@@ -1,0 +1,561 @@
+---
+title: "Testing Guide"
+description: "Write and run tests for Scribe Backend using pytest"
+---
+
+## Overview
+
+Scribe uses **pytest** for all testing with comprehensive markers for categorization. Tests are organized alongside source code with clear separation between unit and integration tests.
+
+<Note>
+  **CRITICAL**: Always run tests from within the virtual environment. Running with system Python will fail.
+</Note>
+
+## Quick Start
+
+```bash
+# Activate virtual environment FIRST
+source venv/bin/activate
+
+# Run all tests
+pytest
+
+# Run with verbose output
+pytest -v
+
+# Run with output capture disabled (see print statements)
+pytest -s
+
+# Run with coverage report
+pytest --cov=pipeline --cov=api --cov-report=html
+```
+
+## Test Markers
+
+Tests are categorized using pytest markers defined in `pytest.ini`:
+
+| Marker | Purpose | Example |
+|--------|---------|--------|
+| `@pytest.mark.unit` | Fast tests, no external dependencies | Template parsing logic |
+| `@pytest.mark.integration` | Tests requiring external services | Database queries, API calls |
+| `@pytest.mark.slow` | Long-running tests (>5 seconds) | Full pipeline execution |
+| `@pytest.mark.asyncio` | Async test functions | All pipeline steps |
+
+### Running Tests by Marker
+
+```bash
+# Run only unit tests (fast)
+pytest -m unit
+
+# Run only integration tests
+pytest -m integration
+
+# Skip slow tests
+pytest -m "not slow"
+
+# Run unit tests that are not slow
+pytest -m "unit and not slow"
+```
+
+## Test Organization
+
+### Directory Structure
+
+```
+pipeline/
+├── steps/
+│   ├── template_parser/
+│   │   ├── main.py
+│   │   └── tests/
+│   │       ├── __init__.py
+│   │       ├── test_template_parser.py
+│   │       └── test_template_parser_logging.py
+│   ├── web_scraper/
+│   │   ├── main.py
+│   │   └── tests/
+│   │       ├── __init__.py
+│   │       └── test_full_pipeline.py
+│   ├── arxiv_helper/
+│   │   ├── main.py
+│   │   └── tests/
+│   │       └── __init__.py
+│   └── email_composer/
+│       ├── main.py
+│       └── tests/
+│           ├── __init__.py
+│           ├── test_email_composer.py
+│           ├── test_db_insert.py
+│           └── test_db_performance.py
+├── tests/
+│   └── test_full_pipeline_request.py
+api/
+tests/
+├── integration/
+│   ├── test_email_api.py
+│   ├── test_templates_api.py
+│   └── test_infrastructure.py
+```
+
+<Note>
+  **Package Structure**: Ensure every directory has an `__init__.py` file for Python to recognize it as a package.
+</Note>
+
+## Writing Tests
+
+### Unit Test Example
+
+Test individual components in isolation:
+
+```python
+# pipeline/steps/template_parser/tests/test_template_parser.py
+
+import pytest
+import logfire
+from uuid import uuid4
+
+from pipeline.steps.template_parser.main import TemplateParserStep
+from pipeline.models.core import PipelineData, TemplateType
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_research_template_parsing():
+    """
+    Test parsing of RESEARCH type template with real Anthropic API.
+
+    Expected behavior:
+    - Returns success=True
+    - Correctly identifies template_type as RESEARCH
+    - Generates 1-2 relevant search terms
+    """
+    logfire.info("Starting test: test_research_template_parsing")
+
+    # Arrange
+    step = TemplateParserStep()
+    data = PipelineData(
+        task_id=str(uuid4()),
+        user_id=str(uuid4()),
+        email_template="Dear {{name}}, I love your work on {{research}}!",
+        recipient_name="Dr. Jane Smith",
+        recipient_interest="machine learning"
+    )
+
+    # Act
+    with logfire.span("test_research_template"):
+        result = await step.execute(data)
+
+    # Assert
+    assert result.success is True
+    assert data.template_type == TemplateType.RESEARCH
+    assert len(data.search_terms) >= 1
+    assert len(data.search_terms) <= 2
+
+    logfire.info(
+        "Test passed",
+        template_type=data.template_type.value,
+        search_terms=data.search_terms
+    )
+```
+
+### Integration Test Example
+
+Test components interacting with external services:
+
+```python
+# tests/integration/test_email_api.py
+
+import pytest
+from httpx import AsyncClient
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_email_generation_api():
+    """
+    Test complete email generation through API endpoint.
+
+    Requires:
+    - Database connection
+    - Valid JWT token
+    - Anthropic API access
+    """
+    async with AsyncClient(base_url="http://localhost:8000") as client:
+        response = await client.post(
+            "/api/email/generate",
+            headers={"Authorization": f"Bearer {jwt_token}"},
+            json={
+                "email_template": "Hi {{name}}, interested in {{research}}!",
+                "recipient_name": "Dr. Test",
+                "recipient_interest": "AI"
+            }
+        )
+
+    assert response.status_code == 200
+    assert "task_id" in response.json()
+```
+
+### Test Fixtures
+
+Use fixtures to reduce code duplication:
+
+```python
+import pytest
+from pipeline.models.core import PipelineData
+from uuid import uuid4
+
+
+@pytest.fixture
+def research_template():
+    """Email template requiring research papers (RESEARCH type)"""
+    return """
+    Dear {{name}},
+    I came across your groundbreaking work on {{research_area}}.
+    Would love to discuss {{specific_application}}.
+    Best regards,
+    {{my_name}}
+    """.strip()
+
+
+@pytest.fixture
+def pipeline_data(research_template):
+    """Create PipelineData instance for testing"""
+    return PipelineData(
+        task_id=str(uuid4()),
+        user_id=str(uuid4()),
+        email_template=research_template,
+        recipient_name="Dr. Jane Smith",
+        recipient_interest="neural networks"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_with_fixture(pipeline_data):
+    """Test using fixtures"""
+    assert pipeline_data.recipient_name == "Dr. Jane Smith"
+    assert len(pipeline_data.email_template) > 0
+```
+
+## Running Tests
+
+### From Project Root
+
+<Steps>
+  <Step title="Activate Virtual Environment">
+    ```bash
+    source venv/bin/activate
+    which pytest  # Should be venv/bin/pytest
+    ```
+  </Step>
+
+  <Step title="Run Tests">
+    ```bash
+    # All tests
+    pytest
+
+    # Specific file
+    pytest pipeline/steps/template_parser/tests/test_template_parser.py
+
+    # Specific function
+    pytest pipeline/steps/template_parser/tests/test_template_parser.py::test_research_template_parsing
+
+    # Directory
+    pytest pipeline/steps/template_parser/tests/
+    ```
+  </Step>
+</Steps>
+
+### Using Makefile
+
+```bash
+# All tests
+make test
+
+# Unit tests only
+make test-unit
+
+# Integration tests only
+make test-integration
+
+# With coverage report (htmlcov/index.html)
+make test-coverage
+```
+
+### With Verbose Output
+
+```bash
+# Show test names and status
+pytest -v
+
+# Show print statements and logs
+pytest -s
+
+# Show local variables on failure
+pytest -v --showlocals
+
+# Combine flags
+pytest -v -s --showlocals
+```
+
+### With Coverage
+
+```bash
+# Generate HTML coverage report
+pytest --cov=pipeline --cov=api --cov-report=html
+
+# Open report
+open htmlcov/index.html  # macOS
+xdg-open htmlcov/index.html  # Linux
+
+# Terminal report only
+pytest --cov=pipeline --cov=api --cov-report=term
+```
+
+## pytest.ini Configuration
+
+The project uses a comprehensive pytest configuration:
+
+```ini
+[pytest]
+# Test discovery paths
+testpaths =
+    pipeline
+    api
+    scripts
+
+# Python files/directories to search for tests
+python_files = test_*.py *_test.py
+python_classes = Test*
+python_functions = test_*
+
+# Async configuration
+asyncio_mode = auto
+asyncio_default_fixture_loop_scope = function
+
+# Output and reporting
+addopts =
+    -ra                    # Show summary of all test outcomes
+    -v                     # Verbose output
+    --showlocals           # Show local variables in tracebacks
+    --strict-markers       # Fail on unknown markers
+    --capture=no           # Better async support
+    --disable-warnings     # Reduce noise
+
+# Markers
+markers =
+    slow: marks tests as slow (deselect with '-m "not slow"')
+    integration: marks tests requiring external services
+    unit: marks tests as unit tests (fast, no external dependencies)
+    asyncio: marks async tests
+```
+
+## Common Testing Patterns
+
+### Testing Async Functions
+
+All pipeline steps are async and require `@pytest.mark.asyncio`:
+
+```python
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_async_function():
+    result = await some_async_function()
+    assert result.success
+```
+
+### Testing Exceptions
+
+```python
+import pytest
+from pipeline.core.exceptions import ValidationError, StepExecutionError
+
+
+@pytest.mark.asyncio
+async def test_empty_template_validation():
+    """Test that empty templates are rejected"""
+    data = PipelineData(
+        task_id="test",
+        user_id="user",
+        email_template="",  # Empty
+        recipient_name="Dr. Test",
+        recipient_interest="testing"
+    )
+
+    with pytest.raises(StepExecutionError) as exc_info:
+        await step.execute(data)
+
+    assert isinstance(exc_info.value.original_error, ValidationError)
+    assert "empty" in str(exc_info.value.original_error).lower()
+```
+
+### Using Logfire for Observability
+
+```python
+import logfire
+
+
+@pytest.mark.asyncio
+async def test_with_logging():
+    """Test with structured logging"""
+    logfire.info("Starting test: test_with_logging")
+
+    with logfire.span("test_operation"):
+        result = await operation()
+        logfire.info("Operation completed", result=result)
+
+    assert result.success
+    logfire.info("Test passed")
+```
+
+## Common Testing Pitfalls
+
+<Accordion title="❌ Running with System Python">
+  ```bash
+  # This will fail if pytest not installed globally
+  pytest test_file.py
+  ```
+
+  **✅ Solution**: Always activate venv first
+  ```bash
+  source venv/bin/activate
+  pytest test_file.py
+  ```
+</Accordion>
+
+<Accordion title="❌ Import Errors">
+  ```
+  ModuleNotFoundError: No module named 'pipeline'
+  ```
+
+  **✅ Solution**: Run from project root with proper package structure
+  ```bash
+  # From /pythonserver root
+  pytest pipeline/steps/template_parser/tests/test_template_parser.py
+
+  # Ensure __init__.py exists:
+  # pipeline/__init__.py
+  # pipeline/steps/__init__.py
+  # pipeline/steps/template_parser/__init__.py
+  ```
+</Accordion>
+
+<Accordion title="❌ Running from Wrong Directory">
+  ```bash
+  cd pipeline/steps/template_parser
+  pytest test_template_parser.py  # May cause import errors
+  ```
+
+  **✅ Solution**: Always run from project root
+  ```bash
+  cd /path/to/pythonserver
+  pytest pipeline/steps/template_parser/tests/test_template_parser.py
+  ```
+</Accordion>
+
+<Accordion title="❌ Missing @pytest.mark.asyncio">
+  ```python
+  async def test_async_function():  # Missing decorator!
+      result = await some_function()
+  ```
+
+  **✅ Solution**: Add marker for async tests
+  ```python
+  @pytest.mark.asyncio
+  async def test_async_function():
+      result = await some_function()
+  ```
+</Accordion>
+
+## Test Coverage Goals
+
+| Component | Target Coverage | Current Status |
+|-----------|----------------|----------------|
+| Pipeline Steps | 90%+ | ✅ High |
+| API Routes | 80%+ | ✅ Good |
+| Database Models | 70%+ | ✅ Good |
+| Utilities | 90%+ | ✅ High |
+
+### Checking Coverage
+
+```bash
+# Generate coverage report
+pytest --cov=pipeline --cov=api --cov-report=term --cov-report=html
+
+# View HTML report
+open htmlcov/index.html
+
+# View terminal report with missing lines
+pytest --cov=pipeline --cov-report=term-missing
+```
+
+## CI/CD Integration
+
+Tests run automatically on every commit:
+
+```yaml
+# .github/workflows/test.yml
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+      - run: pip install -r requirements.txt
+      - run: pytest -v --cov=pipeline --cov=api
+```
+
+## Debugging Failed Tests
+
+### Show More Details
+
+```bash
+# Show local variables on failure
+pytest -v --showlocals
+
+# Drop into debugger on failure
+pytest --pdb
+
+# Show full diff for assertion failures
+pytest -vv
+
+# Only run failed tests from last run
+pytest --lf
+
+# Run failed tests first, then others
+pytest --ff
+```
+
+### Collect Tests Without Running
+
+```bash
+# See what tests would run (useful for debugging imports)
+pytest --collect-only
+
+# See what tests match a marker
+pytest -m unit --collect-only
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Debugging Guide" icon="bug" href="/development/debugging">
+    Learn debugging techniques for pipeline and Celery
+  </Card>
+  <Card title="Project Structure" icon="folder-tree" href="/development/project-structure">
+    Understand where to add new tests
+  </Card>
+  <Card title="Development Setup" icon="wrench" href="/development/setup">
+    Set up your development environment
+  </Card>
+  <Card title="Pipeline Deep Dive" icon="diagram-project" href="/pipeline/overview">
+    Learn about the 4-step pipeline architecture
+  </Card>
+</CardGroup>

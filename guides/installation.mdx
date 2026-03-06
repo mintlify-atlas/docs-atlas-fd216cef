@@ -1,0 +1,251 @@
+---
+title: Installation
+description: Set up Scribe Backend with Python 3.13+, virtual environment, dependencies, and Playwright browsers
+---
+
+## Prerequisites
+
+Before installing Scribe Backend, ensure you have:
+
+- **Python 3.13+** installed on your system
+- **Git** for cloning the repository
+- **PostgreSQL** or a Supabase account
+- **Redis 5.0+** for Celery task queue
+
+<Note>
+  Scribe Backend requires Python 3.13 or higher. Check your version with `python3 --version`.
+</Note>
+
+---
+
+## Step 1: Clone Repository
+
+Clone the Scribe Backend repository to your local machine:
+
+```bash
+git clone <repository-url>
+cd pythonserver
+```
+
+---
+
+## Step 2: Create Virtual Environment
+
+Create an isolated Python environment to manage dependencies:
+
+<Steps>
+  <Step title="Create venv">
+    ```bash
+    python3.13 -m venv venv
+    ```
+    
+    This creates a `venv/` directory containing the isolated Python installation.
+  </Step>
+
+  <Step title="Activate virtual environment">
+    <CodeGroup>
+      ```bash macOS/Linux
+      source venv/bin/activate
+      ```
+
+      ```bash Windows
+      venv\Scripts\activate
+      ```
+    </CodeGroup>
+    
+    Your terminal prompt should now show `(venv)` indicating the environment is active.
+  </Step>
+
+  <Step title="Verify activation">
+    ```bash
+    which python
+    # Should output: /path/to/pythonserver/venv/bin/python
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  Always activate the virtual environment before running any Python commands or installing packages.
+</Warning>
+
+---
+
+## Step 3: Install Python Dependencies
+
+Install all required Python packages from `requirements.txt`:
+
+```bash
+pip install -r requirements.txt
+```
+
+### Key Dependencies Installed
+
+| Package | Version | Purpose |
+|---------|---------|----------|
+| **fastapi** | 0.109+ | Web framework and API server |
+| **sqlalchemy** | 2.0.25+ | ORM for database operations |
+| **alembic** | 1.13.1+ | Database migration management |
+| **celery** | 5.3+ | Distributed task queue |
+| **redis** | 5.0+ | Celery broker and result backend |
+| **anthropic** | 0.72.1+ | Claude AI integration |
+| **pydantic-ai-slim** | 1.18+ | Structured AI agents |
+| **playwright** | 1.56+ | Web scraping (headless browser) |
+| **supabase** | 2.3+ | Authentication and database client |
+| **logfire** | 4.14.2+ | Observability and monitoring |
+
+<Note>
+  Installation may take 2-5 minutes depending on your internet connection. The complete dependency list includes ~50 packages.
+</Note>
+
+---
+
+## Step 4: Install Playwright Browsers
+
+Scribe uses Playwright for web scraping with JavaScript support. Install the Chromium browser:
+
+```bash
+playwright install chromium
+```
+
+<Warning>
+  **Large download:** Playwright browsers are approximately 300MB. Ensure you have sufficient disk space.
+</Warning>
+
+### Verify Playwright Installation
+
+Check that Chromium was installed successfully:
+
+```bash
+playwright --version
+# Expected output: Version 1.56.0 or higher
+```
+
+### Troubleshooting Playwright
+
+<Accordion title="Error: Executable not found">
+  If you see errors about missing executables:
+
+  ```bash
+  # Reinstall with system dependencies
+  playwright install --with-deps chromium
+  ```
+
+  On Linux, you may need additional system libraries:
+  ```bash
+  sudo apt-get install -y libglib2.0-0 libnss3 libnspr4 libdbus-1-3 libatk1.0-0
+  ```
+</Accordion>
+
+<Accordion title="Running in containers/serverless">
+  For Docker or serverless deployments, use the `--no-sandbox` flag (already configured in the codebase):
+
+  ```python
+  # Already configured in web_scraper step
+  browser = await playwright.chromium.launch(
+      headless=True,
+      args=['--no-sandbox', '--disable-setuid-sandbox']
+  )
+  ```
+</Accordion>
+
+---
+
+## Step 5: Verify Installation
+
+Confirm all dependencies are installed correctly:
+
+```bash
+# Check Python version
+python --version
+# Expected: Python 3.13.x
+
+# Check key packages
+python -c "import fastapi; print('FastAPI:', fastapi.__version__)"
+python -c "import sqlalchemy; print('SQLAlchemy:', sqlalchemy.__version__)"
+python -c "import celery; print('Celery:', celery.__version__)"
+python -c "from playwright.sync_api import sync_playwright; print('Playwright: OK')"
+```
+
+### Expected Output
+
+```
+FastAPI: 0.109.0
+SQLAlchemy: 2.0.25
+Celery: 5.3.0
+Playwright: OK
+```
+
+---
+
+## Next Steps
+
+Now that installation is complete:
+
+1. **Configure environment variables** → [Configuration Guide](/guides/configuration)
+2. **Set up the database** → [Database Setup Guide](/guides/database-setup)
+3. **Run the application locally** → [Running Locally Guide](/guides/running-locally)
+
+---
+
+## Common Issues
+
+<AccordionGroup>
+  <Accordion title="pip: command not found">
+    Install pip or use `python -m pip` instead:
+    ```bash
+    python -m pip install -r requirements.txt
+    ```
+  </Accordion>
+
+  <Accordion title="Permission denied errors">
+    Don't use `sudo` with pip in a virtual environment. Ensure you've activated the venv:
+    ```bash
+    source venv/bin/activate
+    pip install -r requirements.txt
+    ```
+  </Accordion>
+
+  <Accordion title="Python 3.13 not found">
+    Install Python 3.13 using your system's package manager:
+
+    **macOS (Homebrew):**
+    ```bash
+    brew install python@3.13
+    ```
+
+    **Ubuntu/Debian:**
+    ```bash
+    sudo apt update
+    sudo apt install python3.13 python3.13-venv
+    ```
+  </Accordion>
+
+  <Accordion title="Installation takes too long">
+    Use a faster mirror or upgrade pip:
+    ```bash
+    pip install --upgrade pip
+    pip install -r requirements.txt --prefer-binary
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Updating Dependencies
+
+To update packages to the latest compatible versions:
+
+```bash
+# Activate virtual environment first
+source venv/bin/activate
+
+# Upgrade all packages
+pip install --upgrade -r requirements.txt
+
+# Reinstall Playwright browsers if needed
+playwright install chromium
+```
+
+<Warning>
+  Test thoroughly after updating dependencies, as major version changes may introduce breaking changes.
+</Warning>

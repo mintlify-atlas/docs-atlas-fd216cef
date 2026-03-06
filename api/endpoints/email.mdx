@@ -1,0 +1,502 @@
+---
+title: "Email Generation"
+description: "Asynchronous email generation with AI-powered personalization"
+---
+
+## POST /api/email/generate
+
+Enqueue a background task to generate a personalized email using the multi-step AI pipeline. This endpoint returns immediately with a task ID for status polling.
+
+<Info>
+  Email generation typically takes 10-30 seconds depending on web scraping and AI processing time.
+</Info>
+
+### Authentication
+
+Requires valid JWT token from Supabase Auth in the `Authorization` header.
+
+### Request Body
+
+<ParamField body="email_template" type="string" required>
+  Email template with placeholders for personalization. Must be 10-5000 characters and contain placeholder syntax (e.g., `{{name}}`, `{{research}}`).
+</ParamField>
+
+<ParamField body="recipient_name" type="string" required>
+  Full name of the email recipient (e.g., "Dr. Jane Smith"). Must be 2-255 characters.
+</ParamField>
+
+<ParamField body="recipient_interest" type="string" required>
+  Research area or interest for personalization (e.g., "machine learning for healthcare"). Must be 2-500 characters.
+</ParamField>
+
+### Request Example
+
+```bash
+curl -X POST https://scribeapi.manitmishra.com/api/email/generate \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email_template": "Hey {{name}}, I loved your work on {{research}}! I have experience in...",
+    "recipient_name": "Dr. Jane Smith",
+    "recipient_interest": "machine learning for medical diagnosis"
+  }'
+```
+
+### Response
+
+<ResponseField name="task_id" type="string">
+  Celery task ID for polling generation status via GET `/api/email/status/{task_id}`
+</ResponseField>
+
+### Response Example
+
+```json
+{
+  "task_id": "abc-123-def-456-ghi-789"
+}
+```
+
+### Status Code
+
+**202 Accepted** - Task has been queued successfully
+
+### Error Responses
+
+<ResponseField name="401 Unauthorized">
+  Invalid or missing JWT token
+</ResponseField>
+
+<ResponseField name="422 Validation Error">
+  Invalid request parameters (template too short/long, missing fields, etc.)
+  
+  ```json
+  {
+    "detail": [
+      {
+        "loc": ["body", "email_template"],
+        "msg": "ensure this value has at least 10 characters",
+        "type": "value_error.any_str.min_length"
+      }
+    ]
+  }
+  ```
+</ResponseField>
+
+---
+
+## GET /api/email/status/{task_id}
+
+Check the status of an asynchronous email generation task. Poll this endpoint every 2 seconds until status is SUCCESS or FAILURE.
+
+<Warning>
+  Task results expire after 1 hour in Redis. After expiration, the task status will show as PENDING.
+</Warning>
+
+### Authentication
+
+Requires valid JWT token from Supabase Auth in the `Authorization` header.
+
+### Path Parameters
+
+<ParamField path="task_id" type="string" required>
+  The Celery task ID returned from POST `/api/email/generate`
+</ParamField>
+
+### Request Example
+
+```bash
+curl -X GET https://scribeapi.manitmishra.com/api/email/status/abc-123-def-456 \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Response
+
+<ResponseField name="task_id" type="string">
+  The task ID being queried
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Current task state: `PENDING`, `STARTED`, `SUCCESS`, or `FAILURE`
+</ResponseField>
+
+<ResponseField name="result" type="object | null">
+  Task result data. Contains different information based on status:
+  - **SUCCESS**: Contains `email_id` and generation metadata
+  - **STARTED**: Contains `current_step` and progress information
+  - **PENDING/FAILURE**: null
+</ResponseField>
+
+<ResponseField name="error" type="string | object | null">
+  Error details if status is FAILURE. Can be a string or structured error object with `message`, `type`, and `failed_step`.
+</ResponseField>
+
+### Response Examples
+
+**Task Queued (PENDING)**
+
+```json
+{
+  "task_id": "abc-123-def-456",
+  "status": "PENDING",
+  "result": null,
+  "error": null
+}
+```
+
+**Task Running (STARTED)**
+
+```json
+{
+  "task_id": "abc-123-def-456",
+  "status": "STARTED",
+  "result": {
+    "current_step": "web_scraper",
+    "step_status": "Searching for professor information...",
+    "step_timings": {
+      "template_parser": 1.2
+    }
+  },
+  "error": null
+}
+```
+
+**Task Completed (SUCCESS)**
+
+```json
+{
+  "task_id": "abc-123-def-456",
+  "status": "SUCCESS",
+  "result": {
+    "email_id": "550e8400-e29b-41d4-a716-446655440000",
+    "generation_time": 12.4,
+    "step_timings": {
+      "template_parser": 1.2,
+      "web_scraper": 6.8,
+      "arxiv_helper": 1.1,
+      "email_composer": 3.3
+    }
+  },
+  "error": null
+}
+```
+
+**Task Failed (FAILURE)**
+
+```json
+{
+  "task_id": "abc-123-def-456",
+  "status": "FAILURE",
+  "result": null,
+  "error": {
+    "message": "Connection timeout while scraping web content",
+    "type": "TimeoutError",
+    "failed_step": "web_scraper"
+  }
+}
+```
+
+### Error Responses
+
+<ResponseField name="401 Unauthorized">
+  Invalid or missing JWT token
+</ResponseField>
+
+<ResponseField name="404 Not Found">
+  Task ID not found or result expired (>1 hour old)
+</ResponseField>
+
+---
+
+## GET /api/email/{email_id}
+
+Retrieve a generated email by its ID. Only the email owner can access their emails.
+
+### Authentication
+
+Requires valid JWT token from Supabase Auth in the `Authorization` header.
+
+### Path Parameters
+
+<ParamField path="email_id" type="string (UUID)" required>
+  The unique identifier of the email to retrieve
+</ParamField>
+
+### Request Example
+
+```bash
+curl -X GET https://scribeapi.manitmishra.com/api/email/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Response
+
+<ResponseField name="id" type="string (UUID)">
+  Email's unique identifier
+</ResponseField>
+
+<ResponseField name="user_id" type="string (UUID)">
+  ID of the user who generated this email
+</ResponseField>
+
+<ResponseField name="recipient_name" type="string">
+  Name of the email recipient
+</ResponseField>
+
+<ResponseField name="recipient_interest" type="string">
+  Research interest used for personalization
+</ResponseField>
+
+<ResponseField name="email_message" type="string">
+  The generated email content (full text)
+</ResponseField>
+
+<ResponseField name="template_type" type="string">
+  Template type detected by the AI: `research`, `book`, or `general`
+</ResponseField>
+
+<ResponseField name="metadata" type="object">
+  Generation metadata including:
+  - `papers_used`: Array of academic papers referenced (for research emails)
+  - `sources`: Array of URLs scraped
+  - `generation_time`: Total time in seconds
+  - `step_timings`: Time spent in each pipeline step
+</ResponseField>
+
+<ResponseField name="is_confident" type="boolean">
+  Whether the AI had sufficient context for high-quality personalization
+</ResponseField>
+
+<ResponseField name="displayed" type="boolean">
+  Whether this email is visible in the user's history (false = discarded)
+</ResponseField>
+
+<ResponseField name="created_at" type="string (ISO 8601)">
+  Timestamp when email was generated
+</ResponseField>
+
+### Response Example
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "user_id": "660e8400-e29b-41d4-a716-446655440001",
+  "recipient_name": "Dr. Jane Smith",
+  "recipient_interest": "machine learning for medical diagnosis",
+  "email_message": "Hey Dr. Smith,\n\nI'm fascinated by your recent work on neural networks for medical imaging. Your paper 'Deep Learning for Radiology' really inspired me...\n\nBest regards",
+  "template_type": "research",
+  "metadata": {
+    "papers_used": [
+      "Deep Learning for Radiology: A Systematic Review (2023)",
+      "Neural Networks in Medical Diagnosis (2024)"
+    ],
+    "sources": [
+      "https://university.edu/faculty/jane-smith",
+      "https://scholar.google.com/citations?user=abc123"
+    ],
+    "generation_time": 12.4,
+    "step_timings": {
+      "template_parser": 1.2,
+      "web_scraper": 6.8,
+      "arxiv_helper": 1.1,
+      "email_composer": 3.3
+    }
+  },
+  "is_confident": true,
+  "displayed": true,
+  "created_at": "2025-01-24T10:35:42Z"
+}
+```
+
+### Error Responses
+
+<ResponseField name="400 Bad Request">
+  Invalid email ID format (not a valid UUID)
+  
+  ```json
+  {
+    "detail": "Invalid email ID format: badly formed hexadecimal UUID string"
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="401 Unauthorized">
+  Invalid or missing JWT token
+</ResponseField>
+
+<ResponseField name="404 Not Found">
+  Email not found or user doesn't have permission to access it
+  
+  ```json
+  {
+    "detail": "Email not found or you don't have permission to access it"
+  }
+  ```
+</ResponseField>
+
+---
+
+## GET /api/email/
+
+Get the user's email generation history, paginated and sorted by newest first.
+
+### Authentication
+
+Requires valid JWT token from Supabase Auth in the `Authorization` header.
+
+### Query Parameters
+
+<ParamField query="limit" type="integer" default="20">
+  Maximum number of emails to return (1-100)
+</ParamField>
+
+<ParamField query="offset" type="integer" default="0">
+  Number of emails to skip for pagination
+</ParamField>
+
+<ParamField query="include_discarded" type="boolean" default="false">
+  Include emails marked as discarded (displayed=false) in results
+</ParamField>
+
+### Request Example
+
+```bash
+# Get first 20 emails (default)
+curl -X GET https://scribeapi.manitmishra.com/api/email/ \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+
+# Get next 20 emails with pagination
+curl -X GET "https://scribeapi.manitmishra.com/api/email/?limit=20&offset=20" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+
+# Include discarded emails
+curl -X GET "https://scribeapi.manitmishra.com/api/email/?include_discarded=true" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Response
+
+Returns an array of `EmailResponse` objects (same schema as GET `/api/email/{email_id}`).
+
+### Response Example
+
+```json
+[
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "user_id": "660e8400-e29b-41d4-a716-446655440001",
+    "recipient_name": "Dr. Jane Smith",
+    "recipient_interest": "machine learning",
+    "email_message": "Hey Dr. Smith...",
+    "template_type": "research",
+    "metadata": { /* ... */ },
+    "is_confident": true,
+    "displayed": true,
+    "created_at": "2025-01-24T12:00:00Z"
+  },
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440001",
+    "user_id": "660e8400-e29b-41d4-a716-446655440001",
+    "recipient_name": "Prof. John Doe",
+    "recipient_interest": "computer vision",
+    "email_message": "Dear Prof. Doe...",
+    "template_type": "general",
+    "metadata": { /* ... */ },
+    "is_confident": false,
+    "displayed": true,
+    "created_at": "2025-01-24T11:30:00Z"
+  }
+]
+```
+
+### Error Responses
+
+<ResponseField name="401 Unauthorized">
+  Invalid or missing JWT token
+</ResponseField>
+
+<ResponseField name="422 Validation Error">
+  Invalid query parameters (e.g., limit > 100)
+</ResponseField>
+
+---
+
+## PATCH /api/email/{email_id}
+
+Update email properties. Currently supports updating the `displayed` field to hide/show emails in history (soft delete).
+
+### Authentication
+
+Requires valid JWT token from Supabase Auth in the `Authorization` header.
+
+### Path Parameters
+
+<ParamField path="email_id" type="string (UUID)" required>
+  The unique identifier of the email to update
+</ParamField>
+
+### Request Body
+
+<ParamField body="displayed" type="boolean" required>
+  Whether to display the email in history:
+  - `true`: Show in email history
+  - `false`: Hide from email history (soft delete)
+</ParamField>
+
+### Request Example
+
+```bash
+# Discard an email (soft delete)
+curl -X PATCH https://scribeapi.manitmishra.com/api/email/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "displayed": false
+  }'
+
+# Restore a discarded email
+curl -X PATCH https://scribeapi.manitmishra.com/api/email/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "displayed": true
+  }'
+```
+
+### Response
+
+Returns the updated `EmailResponse` object.
+
+### Response Example
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "user_id": "660e8400-e29b-41d4-a716-446655440001",
+  "recipient_name": "Dr. Jane Smith",
+  "recipient_interest": "machine learning",
+  "email_message": "Hey Dr. Smith...",
+  "template_type": "research",
+  "metadata": { /* ... */ },
+  "is_confident": true,
+  "displayed": false,
+  "created_at": "2025-01-24T10:35:42Z"
+}
+```
+
+### Error Responses
+
+<ResponseField name="400 Bad Request">
+  Invalid email ID format (not a valid UUID)
+</ResponseField>
+
+<ResponseField name="401 Unauthorized">
+  Invalid or missing JWT token
+</ResponseField>
+
+<ResponseField name="404 Not Found">
+  Email not found or user doesn't have permission to access it
+</ResponseField>
+
+<ResponseField name="422 Validation Error">
+  Invalid request body (missing or invalid `displayed` field)
+</ResponseField>

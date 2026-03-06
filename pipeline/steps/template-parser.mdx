@@ -1,0 +1,259 @@
+---
+title: "Template Parser"
+description: "Step 1: Analyze template and extract search parameters using Claude Haiku"
+---
+
+## Overview
+
+The Template Parser is the first step in the email generation pipeline. It uses Claude Haiku 4.5 to analyze the email template and recipient information, extracting structured data needed for subsequent steps.
+
+**Purpose:**
+- Extract search terms for web scraping
+- Classify template type (RESEARCH/BOOK/GENERAL)
+- Identify placeholders in the template
+
+**Timing:** ~1.2 seconds  
+**Model:** Claude Haiku 4.5  
+**Temperature:** 0.1 (low for consistent structured output)
+
+---
+
+## Input Schema
+
+The Template Parser requires these fields from `PipelineData`:
+
+<ParamField path="email_template" type="string" required>
+  The email template with placeholders (e.g., `{{name}}`, `{{research}}`)
+  
+  **Constraints:**
+  - Min length: 20 characters
+  - Max length: 5,000 characters
+</ParamField>
+
+<ParamField path="recipient_name" type="string" required>
+  Name of the email recipient (e.g., "Dr. Jane Smith")
+  
+  **Constraints:**
+  - Must not be empty
+  - Trimmed of whitespace
+</ParamField>
+
+<ParamField path="recipient_interest" type="string" required>
+  Recipient's research interest or topic area (e.g., "machine learning in healthcare")
+  
+  **Constraints:**
+  - Must not be empty
+  - Trimmed of whitespace
+</ParamField>
+
+---
+
+## Output Schema
+
+The Template Parser updates `PipelineData` with:
+
+<ResponseField name="search_terms" type="string[]">
+  Array of search terms optimized for finding information about the recipient
+  
+  **Example:**
+  ```json
+  [
+    "Dr. Jane Smith machine learning healthcare",
+    "Jane Smith publications",
+    "Jane Smith research papers"
+  ]
+  ```
+</ResponseField>
+
+<ResponseField name="template_type" type="enum">
+  Classified template type based on content analysis
+  
+  **Values:**
+  - `RESEARCH` - Template mentions research papers or publications
+  - `BOOK` - Template mentions books or authored works
+  - `GENERAL` - General template without specific content requirements
+</ResponseField>
+
+<ResponseField name="template_analysis" type="object">
+  Detailed analysis metadata including:
+  
+  - `placeholders` - List of placeholders found (e.g., `["name", "research"]`)
+  - `local_placeholders` - Regex-extracted placeholders for debugging
+</ResponseField>
+
+---
+
+## Implementation Details
+
+### Pydantic-AI Agent
+
+The step uses a structured output agent that automatically validates responses:
+
+```python
+self.agent = create_agent(
+    model=settings.template_parser_model,  # claude-haiku-4-5
+    output_type=TemplateAnalysis,
+    system_prompt=SYSTEM_PROMPT,
+    temperature=0.1,
+    max_tokens=2000,
+    retries=3,
+    timeout=60.0
+)
+```
+
+**Source:** `pipeline/steps/template_parser/main.py:37-45`
+
+### Execution Flow
+
+1. **Validate Input** - Check required fields and template length constraints
+2. **Extract Local Placeholders** - Regex-based extraction for comparison
+3. **Create User Prompt** - Combine template, recipient name, and interest
+4. **Call LLM Agent** - Structured output with automatic validation
+5. **Update Pipeline Data** - Store search terms, template type, and analysis
+6. **Return Success** - With metadata about model used and result counts
+
+```python
+async def _execute_step(self, pipeline_data: PipelineData) -> StepResult:
+    # Extract placeholders locally
+    local_placeholders = extract_placeholders(pipeline_data.email_template)
+    
+    # Create prompt
+    user_prompt = create_user_prompt(
+        email_template=pipeline_data.email_template,
+        recipient_name=pipeline_data.recipient_name,
+        recipient_interest=pipeline_data.recipient_interest
+    )
+    
+    # Call agent (with automatic retries)
+    result = await self.agent.run(user_prompt)
+    analysis = result.output  # Already validated TemplateAnalysis
+    
+    # Update PipelineData
+    pipeline_data.search_terms = analysis.search_terms
+    pipeline_data.template_type = analysis.template_type
+    pipeline_data.template_analysis = {
+        "placeholders": analysis.placeholders,
+        "local_placeholders": local_placeholders
+    }
+    
+    return StepResult(success=True, step_name=self.step_name)
+```
+
+**Source:** `pipeline/steps/template_parser/main.py:67-135`
+
+---
+
+## Structured Output Model
+
+The agent returns data validated against this Pydantic model:
+
+```python
+class TemplateAnalysis(BaseModel):
+    """Structured output from template analysis."""
+    
+    search_terms: List[str] = Field(
+        description="Search terms for finding recipient information"
+    )
+    
+    template_type: TemplateType = Field(
+        description="Classified template type"
+    )
+    
+    placeholders: List[str] = Field(
+        description="List of placeholder names found in template"
+    )
+```
+
+**Source:** `pipeline/steps/template_parser/models.py`
+
+---
+
+## Error Handling
+
+### Fatal Errors (Pipeline Stops)
+
+<Warning>
+  These errors will halt the entire pipeline:
+  
+  - **Empty Template** - `email_template` is missing or empty
+  - **Missing Recipient Data** - `recipient_name` or `recipient_interest` is empty
+  - **Template Too Short** - Less than 20 characters
+  - **Template Too Long** - More than 5,000 characters
+  - **Agent Failure** - LLM API errors or validation failures after 3 retries
+</Warning>
+
+### Retry Strategy
+
+The Pydantic-AI agent automatically retries on:
+- API connection errors
+- Validation failures (invalid JSON, missing fields)
+- Timeout errors
+
+**Configuration:**
+- Max retries: 3
+- Timeout: 60 seconds per attempt
+- Exponential backoff between retries
+
+**Source:** `pipeline/steps/template_parser/main.py:43-44`
+
+---
+
+## Logging & Observability
+
+The step emits structured logs to Logfire:
+
+```python
+logfire.info(
+    "Analyzing template",
+    placeholder_count=placeholder_count,
+    template_length=len(pipeline_data.email_template)
+)
+
+logfire.info(
+    "Template analysis completed successfully",
+    template_type=analysis.template_type.value,
+    search_term_count=len(analysis.search_terms)
+)
+```
+
+**Source:** `pipeline/steps/template_parser/main.py:73-102`
+
+### Tracked Metrics
+
+- Template length (characters)
+- Placeholder count (local vs. LLM-detected)
+- Search term count
+- Template type classification
+- Model used
+- Execution duration
+
+---
+
+## Configuration
+
+The step is configurable via environment variables:
+
+```bash
+# Model selection (hot-swappable)
+TEMPLATE_PARSER_MODEL=anthropic:claude-haiku-4-5
+
+# Alternative models
+# TEMPLATE_PARSER_MODEL=openai:gpt-4o-mini
+# TEMPLATE_PARSER_MODEL=anthropic:claude-opus-4
+```
+
+**Source:** `config/settings.py`
+
+---
+
+## Next Steps
+
+After the Template Parser completes:
+
+1. **Web Scraper** uses `search_terms` to find information about the recipient
+2. **ArXiv Helper** conditionally fetches papers if `template_type == RESEARCH`
+3. **Email Composer** uses `template_analysis` to fill placeholders
+
+<Card title="Next: Web Scraper" icon="globe" href="/pipeline/steps/web-scraper">
+  Learn how search terms are used to fetch and summarize web content
+</Card>

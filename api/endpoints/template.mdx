@@ -1,0 +1,359 @@
+---
+title: "Template Management"
+description: "AI-powered template generation from resumes and template management"
+---
+
+## POST /api/templates/
+
+Generate an email template from a resume PDF using AI. This endpoint is synchronous and typically takes 5-15 seconds. Uses Claude Haiku 4.5 for cost-effective generation.
+
+<Warning>
+  Users are limited to 5 template generations per account. This limit prevents abuse and controls AI costs.
+</Warning>
+
+### Authentication
+
+Requires valid JWT token from Supabase Auth in the `Authorization` header.
+
+### Request Body
+
+<ParamField body="pdf_url" type="string (HTTPS URL)" required>
+  Public URL to the resume PDF file. Must be a valid HTTPS URL pointing to a publicly accessible PDF file (typically from Supabase Storage).
+</ParamField>
+
+<ParamField body="user_instructions" type="string" required>
+  User guidance for template generation including desired tone, style, length, and focus areas. Must be 10-2000 characters.
+</ParamField>
+
+### Request Example
+
+```bash
+curl -X POST https://scribeapi.manitmishra.com/api/templates/ \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "pdf_url": "https://example.supabase.co/storage/v1/object/public/resumes/user-id/resume.pdf",
+    "user_instructions": "Create a warm, enthusiastic template highlighting my machine learning research experience. Keep it professional but friendly, under 200 words. Focus on collaborative opportunities."
+  }'
+```
+
+### Response
+
+<ResponseField name="id" type="string (UUID)">
+  Template's unique identifier
+</ResponseField>
+
+<ResponseField name="user_id" type="string (UUID)">
+  ID of the user who created this template
+</ResponseField>
+
+<ResponseField name="pdf_url" type="string">
+  The resume PDF URL used for generation
+</ResponseField>
+
+<ResponseField name="template_text" type="string">
+  The generated email template with placeholders like `{{professor_name}}`, `{{research_area}}`, etc.
+</ResponseField>
+
+<ResponseField name="user_instructions" type="string">
+  The instructions provided for generation
+</ResponseField>
+
+<ResponseField name="created_at" type="string (ISO 8601)">
+  Timestamp when template was created
+</ResponseField>
+
+### Response Example
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "user_id": "660e8400-e29b-41d4-a716-446655440001",
+  "pdf_url": "https://example.supabase.co/storage/v1/object/public/resumes/user-id/resume.pdf",
+  "template_text": "Dear {{professor_name}},\n\nI hope this email finds you well. I'm a graduate student passionate about machine learning, and I'm particularly fascinated by your work on {{research_area}}.\n\nMy background includes extensive experience in deep learning and neural network architectures, with published research in computer vision. I've developed novel approaches to {{relevant_topic}} that align closely with your recent publications.\n\nI would be honored to discuss potential collaboration opportunities or learn more about ongoing projects in your lab.\n\nBest regards,\nJohn Doe",
+  "user_instructions": "Create a warm, enthusiastic template highlighting my machine learning research experience. Keep it professional but friendly, under 200 words.",
+  "created_at": "2025-01-24T10:30:00Z"
+}
+```
+
+### Status Code
+
+**201 Created** - Template generated and saved successfully
+
+### Generation Process
+
+1. **Limit Check**: Verifies user hasn't exceeded 5 templates
+2. **PDF Extraction**: Downloads PDF and extracts text content
+3. **AI Generation**: Sends resume text + instructions to Claude Haiku 4.5
+4. **Database Save**: Stores template and increments user's template_count
+5. **Response**: Returns complete template object
+
+### Template Placeholders
+
+The AI typically generates templates with these common placeholders:
+
+- `{{professor_name}}` or `{{name}}`: Recipient's name
+- `{{research_area}}` or `{{research}}`: Research interest
+- `{{university}}`: Institution name
+- `{{paper_title}}`: Specific paper or publication
+- `{{relevant_topic}}`: Contextual topic from research
+
+You can use these placeholders when generating emails via POST `/api/email/generate` or POST `/api/queue/batch`.
+
+### Error Responses
+
+<ResponseField name="400 Bad Request">
+  PDF parsing or validation errors
+  
+  ```json
+  {
+    "detail": "Template generation failed: Unable to download PDF from URL. Please ensure the URL is publicly accessible."
+  }
+  ```
+  
+  Common causes:
+  - Invalid or inaccessible PDF URL
+  - PDF file is corrupted or password-protected
+  - PDF contains no extractable text (scanned images only)
+  - Invalid HTTPS certificate
+</ResponseField>
+
+<ResponseField name="401 Unauthorized">
+  Invalid or missing JWT token
+</ResponseField>
+
+<ResponseField name="422 Validation Error">
+  Invalid request parameters
+  
+  ```json
+  {
+    "detail": [
+      {
+        "loc": ["body", "pdf_url"],
+        "msg": "invalid or missing URL scheme",
+        "type": "value_error.url.scheme"
+      }
+    ]
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="429 Too Many Requests">
+  User has exceeded the 5 templates per account limit
+  
+  ```json
+  {
+    "detail": "Template generation limit reached. Maximum 5 templates allowed per user."
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="500 Internal Server Error">
+  AI generation or system errors
+  
+  ```json
+  {
+    "detail": "Failed to create template"
+  }
+  ```
+  
+  Common causes:
+  - Claude API timeout or rate limit
+  - Database connection issues
+  - Unexpected AI response format
+</ResponseField>
+
+---
+
+## GET /api/templates/
+
+List all templates created by the current user, paginated and sorted by newest first.
+
+### Authentication
+
+Requires valid JWT token from Supabase Auth in the `Authorization` header.
+
+### Query Parameters
+
+<ParamField query="limit" type="integer" default="20">
+  Maximum number of templates to return (1-100)
+</ParamField>
+
+<ParamField query="offset" type="integer" default="0">
+  Number of templates to skip for pagination
+</ParamField>
+
+### Request Example
+
+```bash
+# Get first 20 templates (default)
+curl -X GET https://scribeapi.manitmishra.com/api/templates/ \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+
+# Get next 20 templates with pagination
+curl -X GET "https://scribeapi.manitmishra.com/api/templates/?limit=20&offset=20" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+
+# Get only 5 most recent templates
+curl -X GET "https://scribeapi.manitmishra.com/api/templates/?limit=5" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Response
+
+Returns an array of `TemplateResponse` objects (same schema as POST `/api/templates/`).
+
+### Response Example
+
+```json
+[
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "user_id": "660e8400-e29b-41d4-a716-446655440001",
+    "pdf_url": "https://example.supabase.co/storage/v1/object/public/resumes/user-id/resume-v2.pdf",
+    "template_text": "Dear {{professor_name}},\n\nI'm writing to express my strong interest in...",
+    "user_instructions": "Professional and formal tone for academic positions",
+    "created_at": "2025-01-24T12:00:00Z"
+  },
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440001",
+    "user_id": "660e8400-e29b-41d4-a716-446655440001",
+    "pdf_url": "https://example.supabase.co/storage/v1/object/public/resumes/user-id/resume.pdf",
+    "template_text": "Hey {{name}},\n\nI loved your work on {{research}}!...",
+    "user_instructions": "Casual and enthusiastic tone for industry contacts",
+    "created_at": "2025-01-23T10:30:00Z"
+  }
+]
+```
+
+### Error Responses
+
+<ResponseField name="401 Unauthorized">
+  Invalid or missing JWT token
+</ResponseField>
+
+<ResponseField name="422 Validation Error">
+  Invalid query parameters (e.g., limit > 100)
+</ResponseField>
+
+---
+
+## GET /api/templates/{template_id}
+
+Retrieve a specific template by its ID. Only the template owner can access their templates.
+
+### Authentication
+
+Requires valid JWT token from Supabase Auth in the `Authorization` header.
+
+### Path Parameters
+
+<ParamField path="template_id" type="string (UUID)" required>
+  The unique identifier of the template to retrieve
+</ParamField>
+
+### Request Example
+
+```bash
+curl -X GET https://scribeapi.manitmishra.com/api/templates/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Response
+
+Returns a single `TemplateResponse` object.
+
+### Response Example
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "user_id": "660e8400-e29b-41d4-a716-446655440001",
+  "pdf_url": "https://example.supabase.co/storage/v1/object/public/resumes/user-id/resume.pdf",
+  "template_text": "Dear {{professor_name}},\n\nI hope this email finds you well. I'm a graduate student passionate about {{research_area}}, and I'm particularly fascinated by your recent work on {{specific_topic}}.\n\nMy background includes experience in machine learning and data analysis, with projects focusing on neural network optimization and computer vision applications.\n\nI would love to learn more about your research and explore potential opportunities to contribute to your lab's ongoing projects.\n\nBest regards,\nJohn Doe",
+  "user_instructions": "Professional but warm tone, highlighting ML experience, under 200 words",
+  "created_at": "2025-01-24T10:30:00Z"
+}
+```
+
+### Error Responses
+
+<ResponseField name="400 Bad Request">
+  Invalid template ID format (not a valid UUID)
+  
+  ```json
+  {
+    "detail": "Invalid template ID format: badly formed hexadecimal UUID string"
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="401 Unauthorized">
+  Invalid or missing JWT token
+</ResponseField>
+
+<ResponseField name="404 Not Found">
+  Template not found or user doesn't have permission to access it
+  
+  ```json
+  {
+    "detail": "Template not found or you don't have permission to access it"
+  }
+  ```
+</ResponseField>
+
+---
+
+## Template Generation Details
+
+### AI Model Configuration
+
+- **Model**: Claude Haiku 4.5 (`claude-haiku-4.5-20241022`)
+- **Provider**: Anthropic API
+- **Max Tokens**: 4096
+- **Temperature**: 0.7 (balanced creativity)
+- **Timeout**: 45 seconds per request
+- **Retries**: 3 attempts with exponential backoff
+
+### PDF Text Extraction
+
+The system uses `pypdf` library to extract text from PDF files:
+
+1. **Download**: Fetches PDF from provided URL
+2. **Validation**: Ensures file is valid PDF format
+3. **Extraction**: Extracts all text content from all pages
+4. **Sanitization**: Removes excessive whitespace and formatting artifacts
+5. **AI Prompt**: Combines resume text with user instructions
+
+### Supported PDF Features
+
+- **Text-based PDFs**: Fully supported
+- **Scanned PDFs**: Not supported (no OCR)
+- **Password-protected PDFs**: Not supported
+- **Multi-page PDFs**: Supported (all pages extracted)
+- **Embedded images**: Ignored (text only)
+
+### Template Quality Tips
+
+<Tip>
+  For best results:
+  - Use clear, specific instructions (e.g., "professional tone" vs "make it sound good")
+  - Specify desired length (e.g., "under 200 words")
+  - Mention key areas to highlight (e.g., "focus on research experience")
+  - Indicate target audience (e.g., "for academic professors" vs "for industry contacts")
+</Tip>
+
+### Rate Limits
+
+- **Per User**: Maximum 5 templates per account (lifetime)
+- **Per Request**: 45 second timeout for AI generation
+- **API Quota**: Subject to Anthropic API rate limits (handled with retries)
+
+### Storage and Persistence
+
+Templates are stored permanently in the PostgreSQL database:
+
+- No automatic deletion
+- Cascade delete when user account is deleted
+- No size limits on template text (PostgreSQL TEXT field)
+- PDF URLs stored as-is (not downloaded/cached)

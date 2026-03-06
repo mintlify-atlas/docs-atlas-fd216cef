@@ -1,0 +1,712 @@
+---
+title: Deployment
+description: Deploy Scribe Backend to production with Raspberry Pi, Cloudflare Tunnel, and systemd services
+---
+
+## Overview
+
+Scribe Backend is designed for self-hosted deployment on resource-constrained hardware like a **Raspberry Pi**, with traffic routed through a **Cloudflare Tunnel** for secure public access without port forwarding or static IP requirements.
+
+<Note>
+  This guide covers the production deployment architecture used for Scribe, including systemd service configuration, Cloudflare Tunnel setup, and optimization for low-memory environments.
+</Note>
+
+---
+
+## Deployment Architecture
+
+```
+Internet → Cloudflare Edge → Cloudflare Tunnel → Raspberry Pi:8000 (FastAPI)
+                                                  ↓
+                                           Celery Worker (concurrency=1)
+                                                  ↓
+                                           Redis (localhost:6379)
+                                                  ↓
+                                           PostgreSQL (Supabase Transaction Pooler)
+```
+
+**Key Components:**
+
+1. **Cloudflare Tunnel:** Secure outbound-only connection to Cloudflare's edge network
+2. **FastAPI Server:** HTTP API exposed on port 8000 (internal)
+3. **Celery Worker:** Background task processor with `concurrency=1`
+4. **Redis:** Local message broker and result backend
+5. **Supabase:** Managed PostgreSQL database with transaction pooler
+
+<Warning>
+  This architecture is optimized for Raspberry Pi 3B+ (1GB RAM). Adjust concurrency and worker count for higher-spec hardware.
+</Warning>
+
+---
+
+## Production Hardware
+
+### Current Deployment Specs
+
+**Raspberry Pi 3B+:**
+- **SoC:** Broadcom BCM2837B0, quad-core Cortex-A53 (ARMv8) 64-bit @ 1.4GHz
+- **RAM:** 1GB LPDDR2 SDRAM
+- **Networking:** Gigabit Ethernet (max ~300Mb/s via USB 2.0), dual-band 802.11ac Wi-Fi
+- **Storage:** Micro-SD card (64GB+ recommended)
+
+**Memory Breakdown:**
+- **OS + System:** ~200-300MB
+- **FastAPI + Uvicorn:** ~80MB
+- **Redis:** ~30MB
+- **Celery Worker (idle):** ~50MB
+- **Celery Worker (task running):** ~400-500MB (Playwright browser active)
+- **Headroom:** ~340-440MB
+
+<Note>
+  With `concurrency=1`, Scribe processes 3-4 emails per minute, which is sufficient for most academic outreach workflows. Upgrade to Pi 4 (4GB) or Pi 5 (8GB) for higher throughput.
+</Note>
+
+---
+
+## Cloudflare Tunnel Setup
+
+### Why Cloudflare Tunnel?
+
+**Benefits:**
+- No port forwarding or firewall configuration
+- No static IP required
+- Automatic SSL/TLS (HTTPS)
+- DDoS protection via Cloudflare's network
+- Zero-trust security model (outbound-only connections)
+
+### Prerequisites
+
+1. **Cloudflare Account:** Free tier is sufficient
+2. **Domain:** Add your domain to Cloudflare (DNS managed by Cloudflare)
+3. **Raspberry Pi:** Running 64-bit Raspberry Pi OS
+
+---
+
+### Step 1: Install Cloudflared
+
+<Steps>
+  <Step title="Download cloudflared binary">
+    ```bash
+    # For Raspberry Pi (ARM64)
+    wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64
+    sudo mv cloudflared-linux-arm64 /usr/local/bin/cloudflared
+    sudo chmod +x /usr/local/bin/cloudflared
+    ```
+
+    Verify installation:
+    ```bash
+    cloudflared --version
+    ```
+  </Step>
+
+  <Step title="Authenticate with Cloudflare">
+    ```bash
+    cloudflared tunnel login
+    ```
+
+    This opens a browser window. Select your domain and authorize the tunnel.
+  </Step>
+
+  <Step title="Create a tunnel">
+    ```bash
+    cloudflared tunnel create scribe-backend
+    ```
+
+    **Output:**
+    ```
+    Tunnel credentials written to /home/pi/.cloudflared/<TUNNEL_ID>.json
+    Created tunnel scribe-backend with id <TUNNEL_ID>
+    ```
+
+    Save the `<TUNNEL_ID>` for later.
+  </Step>
+
+  <Step title="Configure tunnel routing">
+    Create a configuration file at `~/.cloudflared/config.yml`:
+
+    ```yaml
+    tunnel: <TUNNEL_ID>
+    credentials-file: /home/pi/.cloudflared/<TUNNEL_ID>.json
+
+    ingress:
+      - hostname: scribeapi.yourdomain.com
+        service: http://localhost:8000
+      - service: http_status:404
+    ```
+
+    Replace `scribeapi.yourdomain.com` with your desired subdomain.
+  </Step>
+
+  <Step title="Create DNS record">
+    ```bash
+    cloudflared tunnel route dns scribe-backend scribeapi.yourdomain.com
+    ```
+
+    This creates a CNAME record pointing `scribeapi.yourdomain.com` to your tunnel.
+  </Step>
+</Steps>
+
+---
+
+### Step 2: Run Cloudflare Tunnel
+
+**Test the tunnel:**
+```bash
+cloudflared tunnel run scribe-backend
+```
+
+If successful, you'll see:
+```
+INFO Connection to Cloudflare edge established.
+INFO Registered tunnel connection
+```
+
+**Make it persistent:**
+```bash
+sudo cloudflared service install
+sudo systemctl start cloudflared
+sudo systemctl enable cloudflared
+```
+
+---
+
+## Production Environment Variables
+
+Create a production `.env` file with secure credentials:
+
+```bash
+# Application
+ENVIRONMENT=production
+DEBUG=False
+
+# Server
+HOST=0.0.0.0
+PORT=8000
+
+# CORS (production frontend URL)
+ALLOWED_ORIGINS=https://scribe.yourdomain.com
+
+# Database (Supabase Transaction Pooler)
+DB_USER=postgres.<project-ref>
+DB_PASSWORD=<secure-password>
+DB_HOST=aws-0-us-west-1.pooler.supabase.com
+DB_PORT=6543
+DB_NAME=postgres
+
+# Supabase
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
+
+# External APIs
+ANTHROPIC_API_KEY=<anthropic-key>
+EXA_API_KEY=<exa-key>
+FIREWORKS_API_KEY=<fireworks-key>
+
+# LLM Models
+TEMPLATE_PARSER_MODEL=fireworks:accounts/fireworks/models/kimi-k2p5
+EMAIL_COMPOSER_MODEL=fireworks:accounts/fireworks/models/kimi-k2p5
+
+# Redis (local)
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+REDIS_PASSWORD=
+
+# Observability
+LOGFIRE_TOKEN=<logfire-token>
+LOG_LEVEL=INFO
+```
+
+<Warning>
+  **Security:** Never commit the production `.env` file to version control. Store it securely on the server.
+</Warning>
+
+---
+
+## Systemd Services
+
+Create systemd service files to manage FastAPI and Celery as background services.
+
+### FastAPI Service
+
+Create `/etc/systemd/system/scribe-api.service`:
+
+```ini
+[Unit]
+Description=Scribe FastAPI Server
+After=network.target cloudflared.service
+Requires=redis.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/pythonserver
+EnvironmentFile=/home/pi/pythonserver/.env
+ExecStart=/home/pi/pythonserver/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 180 --workers 1
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Key Settings:**
+- `--timeout-keep-alive 180`: Long timeout for polling clients
+- `--workers 1`: Single worker process (sufficient for Raspberry Pi)
+- `Restart=on-failure`: Auto-restart on crashes
+
+---
+
+### Celery Worker Service
+
+Create `/etc/systemd/system/scribe-celery.service`:
+
+```ini
+[Unit]
+Description=Scribe Celery Worker
+After=network.target redis.service
+Requires=redis.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/pythonserver
+EnvironmentFile=/home/pi/pythonserver/.env
+ExecStart=/home/pi/pythonserver/venv/bin/celery -A celery_config.celery_app worker --loglevel=info --queues=email_default --concurrency=1 --pool=solo --max-tasks-per-child=100
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Memory limit (optional, for Raspberry Pi)
+MemoryMax=768M
+MemoryHigh=650M
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Key Settings:**
+- `--concurrency=1`: Single task at a time (memory constraint)
+- `--pool=solo`: Single-threaded execution (most memory-efficient)
+- `--max-tasks-per-child=100`: Restart worker after 100 tasks (prevent memory leaks)
+- `MemoryMax=768M`: Hard memory limit (systemd kills process if exceeded)
+
+---
+
+### Redis Service
+
+Redis is typically installed via package manager and runs as a system service:
+
+```bash
+sudo apt install redis-server
+sudo systemctl enable redis-server
+sudo systemctl start redis-server
+```
+
+Verify Redis is running:
+```bash
+redis-cli ping  # Should respond: PONG
+```
+
+---
+
+### Enable and Start Services
+
+```bash
+# Reload systemd daemon
+sudo systemctl daemon-reload
+
+# Enable services (auto-start on boot)
+sudo systemctl enable scribe-api scribe-celery cloudflared redis-server
+
+# Start services
+sudo systemctl start scribe-api scribe-celery cloudflared redis-server
+
+# Check status
+sudo systemctl status scribe-api
+sudo systemctl status scribe-celery
+sudo systemctl status cloudflared
+```
+
+---
+
+## Build Script
+
+Create a `build.sh` script for deployment automation:
+
+```bash
+#!/bin/bash
+set -e
+
+echo "===== Scribe Backend Build Script ====="
+
+# Activate virtual environment
+source venv/bin/activate
+
+# Upgrade pip
+pip install --upgrade pip
+
+# Install dependencies
+echo "Installing Python dependencies..."
+pip install -r requirements.txt
+
+# Install Playwright browsers (cached after first install)
+echo "Installing Playwright browsers..."
+python -m playwright install chromium
+
+# Run database migrations
+echo "Applying database migrations..."
+alembic upgrade head
+
+echo "Build complete!"
+```
+
+Make it executable:
+```bash
+chmod +x build.sh
+```
+
+**Run on initial deployment and after updates:**
+```bash
+./build.sh
+sudo systemctl restart scribe-api scribe-celery
+```
+
+---
+
+## Monitoring and Logs
+
+### View Service Logs
+
+```bash
+# FastAPI logs
+sudo journalctl -u scribe-api -f
+
+# Celery worker logs
+sudo journalctl -u scribe-celery -f
+
+# Cloudflare Tunnel logs
+sudo journalctl -u cloudflared -f
+
+# Combined logs
+sudo journalctl -u scribe-api -u scribe-celery -f
+```
+
+### Health Monitoring
+
+Set up a cron job to monitor the `/health` endpoint:
+
+```bash
+# Edit crontab
+crontab -e
+
+# Add health check every 5 minutes
+*/5 * * * * curl -f http://localhost:8000/health || systemctl restart scribe-api
+```
+
+---
+
+### Logfire Observability
+
+If `LOGFIRE_TOKEN` is configured, view production traces at:
+- [logfire.pydantic.dev](https://logfire.pydantic.dev/)
+
+**Metrics tracked:**
+- Request latency and throughput
+- Celery task execution time
+- LLM API call costs and tokens
+- Database query performance
+- Error rates and stack traces
+
+---
+
+## Performance Optimization
+
+### Raspberry Pi Tuning
+
+**Increase swap space for memory overhead:**
+```bash
+sudo dphys-swapfile swapoff
+sudo nano /etc/dphys-swapfile  # Set CONF_SWAPSIZE=1024
+sudo dphys-swapfile setup
+sudo dphys-swapfile swapon
+```
+
+**Disable unnecessary services:**
+```bash
+sudo systemctl disable bluetooth
+sudo systemctl disable avahi-daemon
+```
+
+**Set CPU governor to performance:**
+```bash
+echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+```
+
+---
+
+### Database Connection Pooling
+
+Scribe uses **NullPool** with Supabase's transaction pooler (port 6543):
+
+```python
+# Already configured in database/base.py
+engine = create_engine(
+    settings.database_url,
+    poolclass=NullPool,  # No client-side pooling
+    connect_args={
+        "connect_timeout": 30,
+        "options": "-c statement_timeout=30000"
+    }
+)
+```
+
+<Note>
+  Transaction pooler handles connection pooling server-side. NullPool avoids stale connection issues.
+</Note>
+
+---
+
+## Scaling Recommendations
+
+| Hardware | Concurrency | Throughput | Use Case |
+|----------|-------------|------------|-----------|
+| **Pi 3B+ (1GB)** | 1 | ~3-4 emails/min | Development, low-volume production |
+| Pi 4 (2GB) | 1 | ~6 emails/min | Small-scale production |
+| Pi 4 (4GB) | 2 | ~12 emails/min | Medium-scale production |
+| Pi 5 (8GB) | 4 | ~24 emails/min | High-volume production |
+| Cloud (2vCPU, 4GB) | 4 | ~30 emails/min | Enterprise scale |
+
+**To scale up:**
+
+1. **Increase Celery concurrency:**
+   ```bash
+   # In scribe-celery.service
+   ExecStart=... --concurrency=2
+   ```
+
+2. **Add more workers:**
+   ```bash
+   # Start additional worker instances
+   celery -A celery_config.celery_app worker --loglevel=info --queues=email_default --concurrency=2 --hostname=worker2@%h
+   ```
+
+3. **Upgrade hardware:**
+   - Raspberry Pi 5 (8GB RAM)
+   - VPS with 2-4 vCPUs and 4-8GB RAM
+
+---
+
+## Backup and Recovery
+
+### Automated Database Backups
+
+Supabase provides automatic daily backups. For manual backups:
+
+```bash
+# Backup via pg_dump
+pg_dump "postgresql://postgres.<project-ref>:PASSWORD@aws-0-us-west-1.pooler.supabase.com:6543/postgres?sslmode=require" > backup_$(date +%Y%m%d).sql
+```
+
+**Automate with cron:**
+```bash
+# Daily backup at 2 AM
+0 2 * * * /home/pi/backup.sh
+```
+
+---
+
+### Application State Backup
+
+**Redis (task queue state):**
+```bash
+redis-cli SAVE
+cp /var/lib/redis/dump.rdb ~/backups/redis_backup_$(date +%Y%m%d).rdb
+```
+
+**Environment configuration:**
+```bash
+cp /home/pi/pythonserver/.env ~/backups/env_backup_$(date +%Y%m%d).env
+```
+
+---
+
+## Security Best Practices
+
+<AccordionGroup>
+  <Accordion title="Firewall Configuration">
+    Only expose Cloudflare Tunnel (no inbound ports):
+
+    ```bash
+    # Block all incoming except SSH (if needed)
+    sudo ufw default deny incoming
+    sudo ufw default allow outgoing
+    sudo ufw allow 22/tcp  # SSH only
+    sudo ufw enable
+    ```
+
+    Cloudflare Tunnel uses outbound connections only (ports 80/443).
+  </Accordion>
+
+  <Accordion title="Environment Variable Security">
+    **Protect `.env` file:**
+    ```bash
+    chmod 600 /home/pi/pythonserver/.env
+    chown pi:pi /home/pi/pythonserver/.env
+    ```
+
+    **Never commit to version control:**
+    ```bash
+    # Ensure .env is in .gitignore
+    echo ".env" >> .gitignore
+    ```
+  </Accordion>
+
+  <Accordion title="Service User Isolation">
+    Run services as non-root user:
+    ```bash
+    # Already configured in systemd services
+    User=pi
+    Group=pi
+    ```
+  </Accordion>
+
+  <Accordion title="HTTPS Enforcement">
+    Cloudflare Tunnel enforces HTTPS by default. Verify in Cloudflare dashboard:
+    - **SSL/TLS → Overview → Full (strict)**
+    - **Always Use HTTPS → On**
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Troubleshooting Production Issues
+
+<AccordionGroup>
+  <Accordion title="Service won't start">
+    **Check service status:**
+    ```bash
+    sudo systemctl status scribe-api
+    sudo journalctl -u scribe-api -n 50
+    ```
+
+    **Common causes:**
+    - Missing `.env` file or invalid credentials
+    - Port 8000 already in use
+    - Database connection failure
+  </Accordion>
+
+  <Accordion title="Out of memory crashes">
+    **Symptoms:** Worker killed with no error message
+
+    **Solutions:**
+    1. Verify `concurrency=1` in systemd service
+    2. Add swap space (see Performance Optimization)
+    3. Set memory limits in systemd: `MemoryMax=768M`
+    4. Monitor with: `htop` or `free -h`
+  </Accordion>
+
+  <Accordion title="Cloudflare Tunnel disconnects">
+    **Check tunnel status:**
+    ```bash
+    sudo systemctl status cloudflared
+    sudo journalctl -u cloudflared -f
+    ```
+
+    **Restart tunnel:**
+    ```bash
+    sudo systemctl restart cloudflared
+    ```
+
+    Ensure credentials file exists:
+    ```bash
+    ls -lh ~/.cloudflared/*.json
+    ```
+  </Accordion>
+
+  <Accordion title="High latency or slow responses">
+    **Diagnose:**
+    1. Check CPU usage: `htop`
+    2. Check network: `ping 8.8.8.8`
+    3. Check database latency: Supabase dashboard
+    4. Review Logfire traces for bottlenecks
+
+    **Optimize:**
+    - Increase `timeout-keep-alive` in uvicorn command
+    - Reduce LLM temperature for faster responses
+    - Use faster LLM model (Haiku instead of Sonnet)
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Deployment Checklist
+
+<Steps>
+  <Step title="Prepare environment">
+    - [ ] Fresh Raspberry Pi OS installation
+    - [ ] Python 3.13+ installed
+    - [ ] Git repository cloned
+    - [ ] Virtual environment created
+  </Step>
+
+  <Step title="Configure services">
+    - [ ] `.env` file with production credentials
+    - [ ] Database migrations applied
+    - [ ] Redis installed and running
+    - [ ] Playwright browsers installed
+  </Step>
+
+  <Step title="Set up Cloudflare Tunnel">
+    - [ ] Domain added to Cloudflare
+    - [ ] Tunnel created and configured
+    - [ ] DNS record created
+    - [ ] Tunnel service running
+  </Step>
+
+  <Step title="Configure systemd services">
+    - [ ] `scribe-api.service` created
+    - [ ] `scribe-celery.service` created
+    - [ ] Services enabled and started
+    - [ ] Logs verified
+  </Step>
+
+  <Step title="Verify deployment">
+    - [ ] Health check: `curl https://scribeapi.yourdomain.com/health`
+    - [ ] API docs: `https://scribeapi.yourdomain.com/docs`
+    - [ ] Generate test email successfully
+    - [ ] Monitor logs for errors
+  </Step>
+
+  <Step title="Set up monitoring">
+    - [ ] Logfire token configured
+    - [ ] Cron health checks enabled
+    - [ ] Database backups scheduled
+  </Step>
+</Steps>
+
+---
+
+## Production URL
+
+The official Scribe Backend production deployment:
+
+**API Base URL:** `https://scribeapi.manitmishra.com`
+
+**Endpoints:**
+- Health: `https://scribeapi.manitmishra.com/health`
+- API Docs: `https://scribeapi.manitmishra.com/docs`
+
+---
+
+## Additional Resources
+
+- [Cloudflare Tunnel Documentation](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/)
+- [Raspberry Pi OS Setup Guide](https://www.raspberrypi.com/software/)
+- [Systemd Service Management](https://www.freedesktop.org/software/systemd/man/systemd.service.html)
+- [Supabase Connection Pooling](https://supabase.com/docs/guides/database/connecting-to-postgres#connection-pooler)

@@ -1,0 +1,353 @@
+---
+title: 'Authentication Flow'
+description: 'Supabase JWT validation and user authorization'
+icon: 'shield-check'
+---
+
+## Overview
+
+Scribe uses **Supabase JWT authentication** with a backend-first architecture. The frontend handles OAuth and login, while the backend validates tokens and performs all database operations.
+
+<Info>
+  **Security Model**: Frontend uses Supabase **only** for authentication. Backend uses service role key for database access with JWT validation.
+</Info>
+
+## Authentication Architecture
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Frontend as Next.js Frontend
+    participant Supabase as Supabase Auth
+    participant Backend as FastAPI Backend
+    participant DB as PostgreSQL
+
+    User->>Frontend: Login (email/password or OAuth)
+    Frontend->>Supabase: Authenticate user
+    Supabase-->>Frontend: Return JWT token
+    
+    Frontend->>Backend: API Request with Authorization header
+    Note over Frontend,Backend: Authorization: Bearer {jwt_token}
+    
+    Backend->>Supabase: Validate JWT token
+    Supabase-->>Backend: Return user data (id, email)
+    
+    Backend->>DB: Query local user table
+    DB-->>Backend: Return user record
+    
+    Backend->>Backend: Perform operation
+    Backend-->>Frontend: Return response
+```
+
+## Core Dependencies
+
+### get_supabase_user
+
+Validates JWT token via Supabase API without checking the local database.
+
+```python api/dependencies.py
+async def get_supabase_user(
+    creds: HTTPAuthorizationCredentials = Security(security_scheme),
+) -> SupabaseUser:
+    """
+    Validate JWT token via Supabase API. Does not check local database.
+
+    Raises:
+        HTTPException: 401 if token invalid, 503 if Supabase unavailable
+    """
+    token = creds.credentials
+
+    # Get Supabase client
+    try:
+        supabase = get_supabase_client()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Supabase client not available: {str(e)}",
+        )
+
+    # Validate token with Supabase
+    try:
+        # This makes a network call to Supabase to validate the token
+        supabase_response = supabase.auth.get_user(token)
+
+        # Extract user data from response
+        if not supabase_response or not supabase_response.user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: no user data returned",
+            )
+
+        user_data = supabase_response.user
+
+        # Return validated user data
+        return SupabaseUser(
+            id=user_data.id,
+            email=user_data.email,
+        )
+
+    except AuthApiError as e:
+        # Supabase-specific auth errors (invalid/expired token, etc.)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid token: {e.message}",
+        )
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        # Catch any other unexpected errors
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Token validation failed: {str(e)}",
+        )
+```
+
+<Warning>
+  This function makes a **network call** to Supabase on every request. For high-traffic scenarios, consider implementing token caching with expiry checks.
+</Warning>
+
+### get_current_user
+
+Retrieves the authenticated user from the local database after JWT validation.
+
+```python api/dependencies.py
+async def get_current_user(
+    supabase_user: SupabaseUser = Depends(get_supabase_user),
+    db: Session = Depends(get_db),
+) -> User:
+    """
+    Get authenticated user from local database after JWT validation.
+
+    Raises:
+        HTTPException: 403 if user not initialized (requires POST /api/user/init)
+    """
+    # Query local database for user
+    db_user = db.query(User).filter(User.id == supabase_user.id).first()
+
+    if not db_user:
+        # Valid Supabase user, but not initialized in our backend
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User profile not initialized. Please call POST /api/user/init first.",
+        )
+
+    return db_user
+```
+
+<Note>
+  Users must call `POST /api/user/init` after Supabase signup to create a local database record. This separates authentication (Supabase) from authorization (local DB).
+</Note>
+
+## SupabaseUser Schema
+
+Minimal user data returned from Supabase JWT validation:
+
+```python schemas/auth.py
+class SupabaseUser(BaseModel):
+    """User data extracted from validated Supabase JWT token."""
+    
+    id: str
+    """User UUID from Supabase auth.users table"""
+    
+    email: str
+    """User's email address"""
+```
+
+## HTTP Bearer Security Scheme
+
+The security scheme extracts the JWT token from the `Authorization` header:
+
+```python api/dependencies.py
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+# HTTP Bearer security scheme (checks for "Authorization: Bearer ..." header)
+security_scheme = HTTPBearer()
+```
+
+**Expected Header Format**:
+```http
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+## Usage in Endpoints
+
+### Protected Route Example
+
+```python api/routes/queue.py
+from fastapi import APIRouter, Depends
+from api.dependencies import get_current_user
+from models.user import User
+
+router = APIRouter(prefix="/api/queue", tags=["Queue"])
+
+@router.post("/batch")
+async def submit_batch(
+    batch_request: BatchSubmitRequest,
+    current_user: User = Depends(get_current_user),  # ✅ Authenticated user
+    db: Session = Depends(get_db),
+):
+    """
+    Submit batch of emails. Only authenticated users can call this.
+    """
+    # current_user is validated and from database
+    # User ID is from JWT token, not request body
+    queue_item = QueueItem(
+        user_id=current_user.id,  # ✅ Use validated user ID
+        recipient_name=batch_request.recipient_name,
+        ...
+    )
+    db.add(queue_item)
+    db.commit()
+    
+    return {"message": "Batch submitted"}
+```
+
+### Two-Stage Authentication
+
+Some endpoints need only JWT validation, not database lookup:
+
+```python
+@router.post("/user/init")
+async def initialize_user(
+    supabase_user: SupabaseUser = Depends(get_supabase_user),  # ✅ JWT only
+    db: Session = Depends(get_db),
+):
+    """
+    Initialize user profile. Uses JWT validation only (user may not exist in DB yet).
+    """
+    # Check if user already exists
+    existing_user = db.query(User).filter(User.id == supabase_user.id).first()
+    
+    if existing_user:
+        return existing_user  # Idempotent
+    
+    # Create new user
+    new_user = User(
+        id=supabase_user.id,
+        email=supabase_user.email,
+    )
+    db.add(new_user)
+    db.commit()
+    
+    return new_user
+```
+
+## Error Responses
+
+### 401 Unauthorized
+
+Returned when JWT validation fails:
+
+```json
+{
+  "detail": "Invalid token: Token has expired"
+}
+```
+
+**Common Causes**:
+- Expired JWT token (refresh required)
+- Malformed token
+- Invalid signature
+- Token from different Supabase project
+
+### 403 Forbidden
+
+Returned when JWT is valid but user not initialized:
+
+```json
+{
+  "detail": "User profile not initialized. Please call POST /api/user/init first."
+}
+```
+
+**Solution**: Call `POST /api/user/init` after Supabase signup.
+
+### 503 Service Unavailable
+
+Returned when Supabase API is unreachable:
+
+```json
+{
+  "detail": "Supabase client not available: Connection timeout"
+}
+```
+
+## Security Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Never Trust Request Body" icon="ban">
+    Always extract `user_id` from validated JWT token, **never** from request payload.
+  </Card>
+  
+  <Card title="Use Service Role Key" icon="key">
+    Backend uses Supabase service role key for database operations, not anon key.
+  </Card>
+  
+  <Card title="Row Level Security" icon="shield">
+    Enable RLS on Supabase tables as defense-in-depth, even though backend controls access.
+  </Card>
+  
+  <Card title="Token Expiry" icon="clock">
+    JWT tokens expire after 1 hour by default. Frontend must refresh tokens automatically.
+  </Card>
+</CardGroup>
+
+<Warning>
+  **NEVER** use the Supabase anon key in the backend. It's designed for frontend use only. Backend must use the service role key with JWT validation.
+</Warning>
+
+## Testing Authentication
+
+### Manual Testing with cURL
+
+```bash
+# 1. Get JWT token from Supabase (use frontend or Supabase CLI)
+export TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+
+# 2. Test protected endpoint
+curl -X GET http://localhost:8000/api/queue/ \
+  -H "Authorization: Bearer $TOKEN"
+
+# Expected: 200 OK with queue items
+# If 401: Token invalid or expired
+# If 403: User not initialized
+```
+
+### Pytest Example
+
+```python
+import pytest
+from fastapi.testclient import TestClient
+from unittest.mock import patch, MagicMock
+
+@pytest.fixture
+def mock_supabase_user():
+    """Mock Supabase JWT validation."""
+    with patch('api.dependencies.get_supabase_client') as mock:
+        mock_response = MagicMock()
+        mock_response.user.id = "test-user-123"
+        mock_response.user.email = "test@example.com"
+        mock.return_value.auth.get_user.return_value = mock_response
+        yield mock
+
+def test_protected_endpoint(client: TestClient, mock_supabase_user):
+    """Test endpoint with mocked authentication."""
+    response = client.get(
+        "/api/queue/",
+        headers={"Authorization": "Bearer fake-token"}
+    )
+    
+    assert response.status_code == 200
+```
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Pipeline Architecture" icon="diagram-project" href="/concepts/pipeline">
+    See how authenticated requests trigger email generation
+  </Card>
+  <Card title="Queue System" icon="list-check" href="/concepts/queue-system">
+    Learn how user_id associates queue items with users
+  </Card>
+</CardGroup>

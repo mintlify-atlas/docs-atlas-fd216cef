@@ -1,0 +1,199 @@
+---
+title: "API Overview"
+description: "Complete reference for the Scribe Backend REST API"
+---
+
+# API Overview
+
+Scribe Backend provides a RESTful API for generating personalized academic outreach emails using a multi-step AI pipeline. The API is built with FastAPI and follows OpenAPI 3.0 specifications.
+
+## Base URL
+
+<CodeGroup>
+```bash Production
+https://scribeapi.manitmishra.com
+```
+
+```bash Local Development
+http://localhost:8000
+```
+</CodeGroup>
+
+## API Characteristics
+
+<CardGroup cols={2}>
+  <Card title="Authentication" icon="lock">
+    JWT-based authentication via Supabase Auth with Bearer token in Authorization header
+  </Card>
+  <Card title="Response Format" icon="code">
+    All responses are JSON with consistent error structure and HTTP status codes
+  </Card>
+  <Card title="Rate Limiting" icon="gauge">
+    Currently no hard rate limits, but batch operations limited to 100 items
+  </Card>
+  <Card title="Versioning" icon="code-branch">
+    API version 1.0.0, future versions will use path-based versioning
+  </Card>
+</CardGroup>
+
+## Interactive Documentation
+
+Scribe Backend provides auto-generated interactive API documentation powered by FastAPI's Swagger UI:
+
+```bash
+# Production
+https://scribeapi.manitmishra.com/docs
+
+# Local Development
+http://localhost:8000/docs
+```
+
+The `/docs` endpoint allows you to:
+- Explore all available endpoints
+- View request/response schemas
+- Test API calls directly in the browser
+- Authenticate with JWT tokens
+- View example requests and responses
+
+<Note>
+The interactive docs require authentication for protected endpoints. Click the **Authorize** button and enter your JWT token.
+</Note>
+
+## Response Format
+
+All API responses follow a consistent JSON structure:
+
+### Success Response
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "user_id": "660e8400-e29b-41d4-a716-446655440001",
+  "recipient_name": "Dr. Jane Smith",
+  "email_message": "...",
+  "created_at": "2025-01-13T10:30:00Z"
+}
+```
+
+### Error Response
+
+```json
+{
+  "detail": "Email not found or you don't have permission to access it"
+}
+```
+
+For validation errors:
+
+```json
+{
+  "detail": [
+    {
+      "loc": ["body", "email_template"],
+      "msg": "ensure this value has at least 10 characters",
+      "type": "value_error.any_str.min_length"
+    }
+  ]
+}
+```
+
+## HTTP Status Codes
+
+Scribe Backend uses standard HTTP status codes:
+
+| Status Code | Meaning |
+|-------------|----------|
+| **200 OK** | Request succeeded |
+| **201 Created** | Resource created successfully |
+| **202 Accepted** | Async task accepted for processing |
+| **400 Bad Request** | Invalid request parameters |
+| **401 Unauthorized** | Missing or invalid authentication |
+| **403 Forbidden** | Authenticated but insufficient permissions |
+| **404 Not Found** | Resource not found |
+| **422 Unprocessable Entity** | Validation error |
+| **429 Too Many Requests** | Rate limit exceeded |
+| **500 Internal Server Error** | Server error |
+| **503 Service Unavailable** | Service temporarily unavailable |
+
+## Pagination
+
+List endpoints support pagination via query parameters:
+
+<ParamField query="limit" type="integer" default="50">
+  Maximum number of items to return (max: 100)
+</ParamField>
+
+<ParamField query="offset" type="integer" default="0">
+  Number of items to skip
+</ParamField>
+
+**Example:**
+
+```bash
+curl -X GET "https://scribeapi.manitmishra.com/api/email/?limit=20&offset=40" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+## Health Check
+
+The API provides a public health check endpoint:
+
+```bash
+curl -X GET https://scribeapi.manitmishra.com/health
+```
+
+**Response:**
+
+```json
+{
+  "status": "healthy",
+  "service": "scribe-api",
+  "version": "1.0.0",
+  "database": "connected",
+  "environment": "production"
+}
+```
+
+<Note>
+The health check endpoint is public and does not require authentication.
+</Note>
+
+## API Endpoints Summary
+
+### User Management
+
+- `POST /api/user/init` - Initialize user profile
+- `GET /api/user/profile` - Get current user profile
+
+### Email Generation
+
+- `POST /api/email/generate` - Generate single email (async)
+- `GET /api/email/status/{task_id}` - Check generation status
+- `GET /api/email/{email_id}` - Retrieve email by ID
+- `GET /api/email/` - List user's emails (paginated)
+- `PATCH /api/email/{email_id}` - Update email properties
+
+### Queue Management
+
+- `POST /api/queue/batch` - Submit batch (1-100 recipients)
+- `GET /api/queue/` - Get all user's queue items
+- `DELETE /api/queue/{id}` - Cancel pending queue item
+
+### Template Management
+
+- `POST /api/templates/` - Generate template from resume
+
+<CardGroup cols={2}>
+  <Card title="Authentication Guide" icon="key" href="/api/authentication">
+    Learn how to authenticate API requests
+  </Card>
+  <Card title="Error Handling" icon="triangle-exclamation" href="/api/errors">
+    Understand error responses and troubleshooting
+  </Card>
+  <Card title="User Endpoints" icon="user" href="/api/endpoints/user">
+    User management endpoint documentation
+  </Card>
+  <Card title="Email Endpoints" icon="envelope" href="/api/endpoints/email">
+    Email generation endpoint documentation
+  </Card>
+</CardGroup>

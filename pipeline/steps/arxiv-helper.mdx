@@ -1,0 +1,407 @@
+---
+title: "ArXiv Helper"
+description: "Step 3: Conditionally fetch academic papers from ArXiv for RESEARCH templates"
+---
+
+## Overview
+
+The ArXiv Helper is the third step in the email generation pipeline. It **conditionally** fetches academic papers from ArXiv, but only if the `template_type` is `RESEARCH`. For `BOOK` or `GENERAL` templates, this step is skipped entirely.
+
+**Purpose:**
+- Fetch recent academic papers authored by the recipient
+- Enrich email context with specific research titles and URLs
+- Enable personalized references to the recipient's work
+
+**Timing:** ~0.8 seconds (when executed), ~0.01 seconds (when skipped)  
+**API:** ArXiv API (free, no authentication required)  
+**Conditional:** Only runs if `template_type == RESEARCH`
+
+---
+
+## Input Schema
+
+The ArXiv Helper requires these fields from Step 1 (Template Parser):
+
+<ParamField path="template_type" type="enum" required>
+  Template classification from Step 1
+  
+  **Conditional Logic:**
+  - `RESEARCH` → Fetch papers from ArXiv
+  - `BOOK` → Skip (no papers needed)
+  - `GENERAL` → Skip (no papers needed)
+</ParamField>
+
+<ParamField path="recipient_name" type="string" required>
+  Name of the email recipient
+  
+  **Usage:** Used as author name in ArXiv search query
+  
+  **Example:** `"Jane Smith"` → ArXiv query: `au:"Jane Smith"`
+</ParamField>
+
+<ParamField path="recipient_interest" type="string" required>
+  Recipient's research area or topic
+  
+  **Usage:** Validated to ensure template context is complete
+</ParamField>
+
+---
+
+## Output Schema
+
+The ArXiv Helper updates `PipelineData` with:
+
+<ResponseField name="arxiv_papers" type="object[]">
+  Array of ArXiv papers (up to 5 most recent)
+  
+  **Structure:**
+  ```json
+  [
+    {
+      "title": "Deep Learning for Medical Image Segmentation",
+      "arxiv_url": "https://arxiv.org/abs/2301.12345",
+      "year": "2023",
+      "summary": "Abstract text...",
+      "authors": ["Jane Smith", "John Doe"]
+    }
+  ]
+  ```
+  
+  **Empty Array When:**
+  - `template_type != RESEARCH` (skipped)
+  - No papers found on ArXiv
+  - ArXiv API error (non-fatal)
+</ResponseField>
+
+<ResponseField name="enrichment_metadata" type="object">
+  Metadata about the enrichment operation:
+  
+  **When Skipped:**
+  ```json
+  {
+    "skipped": true,
+    "reason": "template_type is BOOK, not RESEARCH"
+  }
+  ```
+  
+  **When Executed:**
+  ```json
+  {
+    "skipped": false,
+    "papers_found": 3,
+    "search_query": "Jane Smith"
+  }
+  ```
+  
+  **On Error:**
+  ```json
+  {
+    "error": "ArXiv API timeout",
+    "papers_found": 0
+  }
+  ```
+</ResponseField>
+
+---
+
+## Implementation Details
+
+### Conditional Execution
+
+The step first checks template type before searching:
+
+```python
+async def _execute_step(self, pipeline_data: PipelineData) -> StepResult:
+    # Step 1: Check template type
+    if pipeline_data.template_type != TemplateType.RESEARCH:
+        logfire.info(
+            "Skipping ArXiv search - not RESEARCH template",
+            template_type=pipeline_data.template_type.value
+        )
+        
+        # Set empty results
+        pipeline_data.arxiv_papers = []
+        pipeline_data.enrichment_metadata = {
+            "skipped": True,
+            "reason": f"template_type is {pipeline_data.template_type.value}, not RESEARCH"
+        }
+        
+        return StepResult(
+            success=True,
+            step_name=self.step_name,
+            metadata={"skipped": True}
+        )
+```
+
+**Source:** `pipeline/steps/arxiv_helper/main.py:33-55`
+
+### ArXiv Search
+
+When `template_type == RESEARCH`, the step searches by author name:
+
+```python
+papers = await search_arxiv(
+    author_name=pipeline_data.recipient_name
+)
+```
+
+**Search Strategy:**
+- Query: `au:"[recipient_name]"` (exact author name match)
+- Sort: By submission date (most recent first)
+- Max results: 5 papers
+- Timeout: 10 seconds
+
+**Source:** `pipeline/steps/arxiv_helper/main.py:63-65`
+
+### Paper Data Model
+
+Each paper is serialized with:
+
+```python
+class ArxivPaper:
+    title: str          # Paper title
+    arxiv_url: str      # https://arxiv.org/abs/[id]
+    year: str           # Publication year
+    summary: str        # Abstract (truncated to 500 chars)
+    authors: List[str]  # List of author names
+    
+    def to_dict(self) -> dict:
+        """Serialize for PipelineData storage."""
+        return {
+            "title": self.title,
+            "arxiv_url": self.arxiv_url,
+            "year": self.year,
+            "summary": self.summary[:500],  # Truncate for context window
+            "authors": self.authors
+        }
+```
+
+**Source:** `pipeline/steps/arxiv_helper/utils.py`
+
+---
+
+## Execution Flow
+
+### When Template Type is RESEARCH
+
+1. **Check Template Type** - Confirm `template_type == RESEARCH`
+2. **Search ArXiv** - Query by author name
+3. **Handle Empty Results** - Set empty array if no papers found
+4. **Serialize Papers** - Convert to dict format for PipelineData
+5. **Update Pipeline Data** - Store papers and metadata
+6. **Return Success** - With paper count and titles
+
+```python
+# Search ArXiv
+papers = await search_arxiv(
+    author_name=pipeline_data.recipient_name
+)
+
+if not papers:
+    logfire.warning(
+        "No papers found on ArXiv",
+        recipient_name=pipeline_data.recipient_name
+    )
+    pipeline_data.arxiv_papers = []
+    return StepResult(
+        success=True,
+        warnings=["No papers found on ArXiv"]
+    )
+
+# Update PipelineData
+pipeline_data.arxiv_papers = [
+    paper.to_dict() for paper in papers
+]
+
+logfire.info(
+    "ArXiv papers found",
+    total_papers=len(papers),
+    paper_titles=[p.title for p in papers[:3]]
+)
+```
+
+**Source:** `pipeline/steps/arxiv_helper/main.py:57-111`
+
+### When Template Type is NOT RESEARCH
+
+1. **Check Template Type** - Detect `BOOK` or `GENERAL`
+2. **Log Skip Reason** - Record why search was skipped
+3. **Set Empty Results** - `arxiv_papers = []`
+4. **Update Metadata** - Mark as skipped with reason
+5. **Return Success** - With skip metadata
+
+---
+
+## Error Handling
+
+### Non-Fatal Errors (Pipeline Continues)
+
+<Info>
+  ArXiv errors are **always non-fatal** - the pipeline continues with empty results:
+  
+  - **No Papers Found** - Common for non-academics or recent PhDs
+  - **API Timeout** - ArXiv API slow or unresponsive
+  - **Network Errors** - Connection issues
+  - **Parsing Errors** - Malformed ArXiv XML responses
+  
+  Philosophy: Better to send an email without papers than to fail entirely.
+</Info>
+
+```python
+except Exception as e:
+    logfire.error(
+        "Error in ArXiv helper",
+        error=str(e),
+        error_type=type(e).__name__
+    )
+    
+    # ArXiv errors are not fatal - continue pipeline
+    pipeline_data.arxiv_papers = []
+    pipeline_data.enrichment_metadata = {
+        "error": str(e),
+        "papers_found": 0
+    }
+    
+    return StepResult(
+        success=True,  # Still success!
+        step_name=self.step_name,
+        warnings=[f"ArXiv search failed: {str(e)}"]
+    )
+```
+
+**Source:** `pipeline/steps/arxiv_helper/main.py:113-132`
+
+---
+
+## Logging & Observability
+
+The step emits conditional logs based on execution path:
+
+### When Skipped
+
+```python
+logfire.info(
+    "Skipping ArXiv search - not RESEARCH template",
+    template_type=pipeline_data.template_type.value
+)
+```
+
+### When Executed
+
+```python
+logfire.info(
+    "Searching ArXiv for papers",
+    recipient_name=pipeline_data.recipient_name
+)
+
+logfire.info(
+    "ArXiv papers found",
+    total_papers=len(papers),
+    paper_titles=[p.title for p in papers[:3]]
+)
+```
+
+### On Error
+
+```python
+logfire.error(
+    "Error in ArXiv helper",
+    error=str(e),
+    error_type=type(e).__name__
+)
+```
+
+**Source:** `pipeline/steps/arxiv_helper/main.py:36-90`
+
+---
+
+## Performance Characteristics
+
+**Execution Time:**
+- **When Skipped:** ~0.01 seconds (conditional check only)
+- **When Executed:** ~0.8 seconds average
+  - ArXiv API query: ~0.6s
+  - XML parsing: ~0.1s
+  - Data serialization: ~0.1s
+
+**Variance Factors:**
+- ArXiv API response time (varies by load)
+- Number of papers returned (more papers = longer parsing)
+- Network latency
+
+---
+
+## ArXiv API Details
+
+### API Endpoint
+
+```
+GET https://export.arxiv.org/api/query
+```
+
+### Query Parameters
+
+```python
+params = {
+    "search_query": f'au:"{author_name}"',
+    "sortBy": "submittedDate",
+    "sortOrder": "descending",
+    "max_results": 5
+}
+```
+
+### Response Format
+
+ArXiv returns XML (Atom feed format):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Paper Title</title>
+    <id>http://arxiv.org/abs/2301.12345</id>
+    <published>2023-01-15T12:00:00Z</published>
+    <summary>Abstract text...</summary>
+    <author>
+      <name>Jane Smith</name>
+    </author>
+  </entry>
+</feed>
+```
+
+**Source:** `pipeline/steps/arxiv_helper/utils.py`
+
+---
+
+## Configuration
+
+No API key required (ArXiv is free and open). Configuration via environment variables:
+
+```bash
+# ArXiv API timeout (seconds)
+ARXIV_TIMEOUT=10.0
+
+# Max papers to fetch
+ARXIV_MAX_RESULTS=5
+```
+
+**Source:** `config/settings.py`
+
+---
+
+## Next Steps
+
+After the ArXiv Helper completes:
+
+1. **Email Composer** uses `arxiv_papers` to reference specific research in the email
+2. Papers are cited in the final email (if available)
+3. Metadata is stored in database for analytics
+
+<CardGroup cols={2}>
+  <Card title="Previous: Web Scraper" icon="globe" href="/pipeline/steps/web-scraper">
+    How background information is fetched and summarized
+  </Card>
+  <Card title="Next: Email Composer" icon="envelope" href="/pipeline/steps/email-composer">
+    Final email generation and database write
+  </Card>
+</CardGroup>

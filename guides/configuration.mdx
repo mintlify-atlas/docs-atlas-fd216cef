@@ -1,0 +1,420 @@
+---
+title: Configuration
+description: Configure environment variables, Pydantic Settings, and external API keys for Scribe Backend
+---
+
+## Overview
+
+Scribe Backend uses **Pydantic Settings** for type-safe configuration management. All settings are loaded from environment variables defined in a `.env` file.
+
+<Note>
+  The settings module (`config/settings.py`) validates all configuration at startup. Missing required variables will cause the application to fail fast with clear error messages.
+</Note>
+
+---
+
+## Step 1: Create `.env` File
+
+Copy the example environment file and customize it:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` in your preferred text editor:
+
+```bash
+nano .env  # or vim, code, etc.
+```
+
+---
+
+## Step 2: Configure Required Variables
+
+### Application Settings
+
+```bash
+# Application environment
+ENVIRONMENT=development  # Options: development, staging, production
+DEBUG=True               # Enable debug mode (disable in production)
+
+# Server configuration
+HOST=0.0.0.0
+PORT=8000
+
+# CORS origins (comma-separated)
+ALLOWED_ORIGINS=http://localhost:3000,https://yourdomain.com
+```
+
+<Warning>
+  **Security:** Set `DEBUG=False` in production environments to prevent sensitive information leakage.
+</Warning>
+
+---
+
+### Database Configuration
+
+Scribe uses Supabase's **transaction pooler** for PostgreSQL connections:
+
+```bash
+# Supabase Transaction Pooler (Port 6543)
+DB_USER=postgres.<project-ref>
+DB_PASSWORD=your-database-password
+DB_HOST=aws-0-us-west-1.pooler.supabase.com
+DB_PORT=6543  # Transaction pooler port
+DB_NAME=postgres
+
+# Connection tuning
+DB_CONNECT_TIMEOUT=30      # Connection timeout in seconds
+DB_STATEMENT_TIMEOUT=30000 # Query timeout in milliseconds
+```
+
+<Note>
+  **Transaction Pooler (Port 6543):** Recommended for production. Supabase's Supavisor handles connection pooling server-side. Use NullPool on the client side to avoid stale connections.
+</Note>
+
+<Accordion title="Alternative: Session Pooler (Port 5432)">
+  If you need session-based pooling for long-running transactions:
+
+  ```bash
+  DB_HOST=aws-0-us-west-1.pooler.supabase.com
+  DB_PORT=5432  # Session pooler port
+  ```
+
+  Not recommended for Scribe's stateless architecture.
+</Accordion>
+
+---
+
+### Supabase Authentication
+
+```bash
+# Supabase project URL
+SUPABASE_URL=https://<your-project-ref>.supabase.co
+
+# Service role key (backend operations)
+SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+<Warning>
+  **Security:** The service role key has full database access. Never expose it to the frontend or commit it to version control.
+</Warning>
+
+**Where to find these values:**
+
+1. Go to your Supabase project dashboard
+2. Navigate to **Settings → API**
+3. Copy **Project URL** and **service_role key**
+
+---
+
+### External API Keys
+
+#### Anthropic (Required)
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-api03-...
+```
+
+- **Purpose:** Claude AI models for template parsing and email composition
+- **Get your key:** [console.anthropic.com](https://console.anthropic.com/)
+- **Models used:** Claude Haiku 4.5, Claude Sonnet 4.5
+
+#### Exa Search (Required)
+
+```bash
+EXA_API_KEY=your-exa-api-key-here
+```
+
+- **Purpose:** Web search for recipient information
+- **Get your key:** [exa.ai](https://exa.ai/)
+- **Replaces:** Google Custom Search API (better for academic content)
+
+#### Fireworks AI (Optional)
+
+```bash
+FIREWORKS_API_KEY=your-fireworks-api-key-here  # Optional
+```
+
+- **Purpose:** Alternative LLM provider (cost-effective)
+- **Get your key:** [fireworks.ai](https://fireworks.ai/)
+- **Models:** Kimi K2p5 (hot-swappable via model config)
+
+---
+
+### LLM Model Configuration (Hot-Swappable)
+
+Scribe supports multiple LLM providers via environment variables:
+
+```bash
+# Template Parser - Fast extraction (default: Kimi K2p5)
+TEMPLATE_PARSER_MODEL=fireworks:accounts/fireworks/models/kimi-k2p5
+# Alternative: anthropic:claude-haiku-4-5
+
+# Email Composer - High-quality writing (default: Kimi K2p5)
+EMAIL_COMPOSER_MODEL=fireworks:accounts/fireworks/models/kimi-k2p5
+# Alternative: anthropic:claude-sonnet-4-5
+
+# Template Generator - Resume parsing (default: Kimi K2p5)
+TEMPLATE_GENERATOR_MODEL=fireworks:accounts/fireworks/models/kimi-k2p5
+# Alternative: anthropic:claude-haiku-4-5
+```
+
+**Format:** `{provider}:{model-identifier}`
+
+<Note>
+  Change models without code modifications. Ideal for A/B testing or cost optimization.
+</Note>
+
+---
+
+### Redis Configuration
+
+```bash
+# Celery broker and result backend
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+REDIS_PASSWORD=  # Leave empty for local development
+```
+
+<Accordion title="Production Redis (Upstash, Redis Cloud)">
+  For managed Redis in production:
+
+  ```bash
+  REDIS_HOST=redis-12345.c1.us-west-1.cloud.redislabs.com
+  REDIS_PORT=12345
+  REDIS_PASSWORD=your-redis-password
+  REDIS_DB=0
+  ```
+</Accordion>
+
+---
+
+### Observability (Optional)
+
+```bash
+# Logfire token for distributed tracing
+LOGFIRE_TOKEN=your-logfire-token-here
+
+# Logging level
+LOG_LEVEL=INFO  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+```
+
+- **Logfire:** Built by Pydantic team, provides automatic instrumentation
+- **Get your token:** [logfire.pydantic.dev](https://logfire.pydantic.dev/)
+- **Features:** LLM call tracking, distributed tracing, cost monitoring
+
+<Note>
+  Logfire is optional but highly recommended for production deployments. It provides deep visibility into pipeline performance and LLM usage.
+</Note>
+
+---
+
+## Pydantic Settings Explained
+
+Scribe uses `pydantic-settings` for configuration management (`config/settings.py`):
+
+### Key Features
+
+1. **Type Validation:** Environment variables are validated at startup
+2. **Default Values:** Missing optional variables use sensible defaults
+3. **Computed Properties:** Dynamic values like `database_url` are auto-generated
+4. **Field Validators:** Custom validation logic (e.g., port validation)
+
+### Example: Database URL Construction
+
+```python
+class Settings(BaseSettings):
+    db_user: str
+    db_password: str
+    db_host: str
+    db_port: int = 6543
+    db_name: str
+
+    @property
+    def database_url(self) -> str:
+        """Auto-construct PostgreSQL connection string."""
+        return (
+            f"postgresql+psycopg2://{self.db_user}:{self.db_password}@"
+            f"{self.db_host}:{self.db_port}/{self.db_name}?sslmode=require"
+        )
+```
+
+**Benefits:**
+- No need to manually construct connection strings
+- Automatic SSL enforcement (`sslmode=require`)
+- Type-safe access throughout the codebase
+
+---
+
+## Configuration Validation
+
+### Port Validation
+
+The settings module validates that `DB_PORT` matches the connection type:
+
+```python
+@field_validator("db_port")
+@classmethod
+def validate_db_port_matches_host(cls, v: int) -> int:
+    if v not in [5432, 6543]:
+        raise ValueError(
+            f"Invalid database port: {v}. "
+            "Use 6543 for transaction pooler or 5432 for session pooler."
+        )
+    return v
+```
+
+<Warning>
+  Mixing port 6543 with a non-pooler host will trigger a warning at startup.
+</Warning>
+
+---
+
+## Environment-Specific Configuration
+
+### Development
+
+```bash
+ENVIRONMENT=development
+DEBUG=True
+ALLOWED_ORIGINS=http://localhost:3000
+LOG_LEVEL=DEBUG
+```
+
+### Production
+
+```bash
+ENVIRONMENT=production
+DEBUG=False
+ALLOWED_ORIGINS=https://yourdomain.com,https://app.yourdomain.com
+LOG_LEVEL=INFO
+```
+
+<Note>
+  Use `settings.is_production` or `settings.is_development` in code to conditionally enable features.
+</Note>
+
+---
+
+## Usage Limits
+
+```bash
+# Template generation limit per user
+TEMPLATE_GENERATION_LIMIT=5
+
+# Pagination defaults
+PAGINATION_MAX_LIMIT=100
+PAGINATION_DEFAULT_LIMIT=20
+```
+
+These limits prevent abuse and ensure fair resource allocation.
+
+---
+
+## Accessing Settings in Code
+
+Import the singleton `settings` instance:
+
+```python
+from config.settings import settings
+
+# Access configuration
+print(settings.database_url)
+print(settings.anthropic_api_key)
+print(settings.is_production)
+
+# Type-safe access
+if settings.debug:
+    print("Running in debug mode")
+```
+
+---
+
+## Complete `.env` Example
+
+```bash
+# Application
+ENVIRONMENT=development
+DEBUG=True
+
+# Supabase
+SUPABASE_URL=https://abcdefgh.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+# Database (Transaction Pooler)
+DB_USER=postgres.abcdefgh
+DB_PASSWORD=your-secure-password
+DB_HOST=aws-0-us-west-1.pooler.supabase.com
+DB_PORT=6543
+DB_NAME=postgres
+
+# External APIs
+ANTHROPIC_API_KEY=sk-ant-api03-...
+EXA_API_KEY=exa-api-key-...
+FIREWORKS_API_KEY=fw-api-key-...  # Optional
+
+# LLM Models (Hot-swappable)
+TEMPLATE_PARSER_MODEL=fireworks:accounts/fireworks/models/kimi-k2p5
+EMAIL_COMPOSER_MODEL=fireworks:accounts/fireworks/models/kimi-k2p5
+
+# Redis
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+REDIS_PASSWORD=
+
+# Observability
+LOGFIRE_TOKEN=logfire-token-...
+LOG_LEVEL=INFO
+
+# Server
+HOST=0.0.0.0
+PORT=8000
+ALLOWED_ORIGINS=http://localhost:3000
+```
+
+---
+
+## Next Steps
+
+- **Set up the database** → [Database Setup Guide](/guides/database-setup)
+- **Run the application** → [Running Locally Guide](/guides/running-locally)
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Missing required environment variable">
+    **Error:** `Field required [type=missing]`
+
+    **Solution:** Ensure all required variables are set in `.env`. Check the error message for the specific field name.
+  </Accordion>
+
+  <Accordion title="Invalid database port">
+    **Error:** `Invalid database port: 5433`
+
+    **Solution:** Use port 6543 (transaction pooler) or 5432 (session pooler).
+  </Accordion>
+
+  <Accordion title="Settings not loading">
+    **Issue:** Changes to `.env` not reflected
+
+    **Solution:**
+    1. Ensure `.env` is in the project root (same directory as `main.py`)
+    2. Restart the application (settings are loaded at startup)
+    3. Check file permissions: `chmod 600 .env`
+  </Accordion>
+
+  <Accordion title="CORS errors in browser">
+    **Issue:** Frontend requests blocked by CORS
+
+    **Solution:** Add your frontend URL to `ALLOWED_ORIGINS`:
+    ```bash
+    ALLOWED_ORIGINS=http://localhost:3000,https://app.yourdomain.com
+    ```
+    Restart the server after changes.
+  </Accordion>
+</AccordionGroup>

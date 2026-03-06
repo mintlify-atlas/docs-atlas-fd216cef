@@ -1,0 +1,379 @@
+---
+title: "Queue Management"
+description: "Batch email generation queue for processing multiple emails sequentially"
+---
+
+## POST /api/queue/batch
+
+Submit a batch of email generation requests to the queue. All items will be processed sequentially to avoid API rate limits. Maximum 100 items per batch.
+
+<Info>
+  Queue items are processed with `concurrency=1` in Celery to prevent rate limiting from external APIs. Frontend should poll GET `/api/queue/` every 2 seconds for status updates.
+</Info>
+
+### Authentication
+
+Requires valid JWT token from Supabase Auth in the `Authorization` header.
+
+### Request Body
+
+<ParamField body="items" type="array" required>
+  Array of batch items to queue. Must contain 1-100 items. Each item has:
+  - `recipient_name` (string, 2-255 chars): Full name of recipient
+  - `recipient_interest` (string, 2-500 chars): Research area for personalization
+</ParamField>
+
+<ParamField body="email_template" type="string" required>
+  Email template to use for all items in the batch. Must be 10-5000 characters with placeholders like `{{name}}` and `{{research}}`.
+</ParamField>
+
+### Request Example
+
+```bash
+curl -X POST https://scribeapi.manitmishra.com/api/queue/batch \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "items": [
+      {
+        "recipient_name": "Dr. Jane Smith",
+        "recipient_interest": "machine learning for healthcare"
+      },
+      {
+        "recipient_name": "Prof. John Doe",
+        "recipient_interest": "computer vision and robotics"
+      },
+      {
+        "recipient_name": "Dr. Alice Johnson",
+        "recipient_interest": "natural language processing"
+      }
+    ],
+    "email_template": "Hey {{name}}, I loved your work on {{research}}! I have experience in similar areas and would love to discuss potential collaboration opportunities.\n\nBest regards"
+  }'
+```
+
+### Response
+
+<ResponseField name="queue_item_ids" type="array of strings">
+  Array of UUID strings for the created queue items. Use these IDs to track individual items via GET `/api/queue/`.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Success confirmation message with item count
+</ResponseField>
+
+### Response Example
+
+```json
+{
+  "queue_item_ids": [
+    "550e8400-e29b-41d4-a716-446655440000",
+    "550e8400-e29b-41d4-a716-446655440001",
+    "550e8400-e29b-41d4-a716-446655440002"
+  ],
+  "message": "Successfully queued 3 items"
+}
+```
+
+### Status Code
+
+**201 Created** - Queue items created successfully and Celery tasks dispatched
+
+### Processing Flow
+
+1. **Database Insert**: All queue items created with status `PENDING`
+2. **Task Dispatch**: Celery tasks dispatched for each item
+3. **Sequential Processing**: Celery worker processes items one at a time (FIFO order)
+4. **Status Updates**: Each item transitions: `PENDING` → `PROCESSING` → `COMPLETED` or `FAILED`
+
+### Error Responses
+
+<ResponseField name="400 Bad Request">
+  Invalid batch size or field validation errors
+  
+  ```json
+  {
+    "detail": "Maximum 100 items per batch"
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="401 Unauthorized">
+  Invalid or missing JWT token
+</ResponseField>
+
+<ResponseField name="422 Validation Error">
+  Invalid request structure or field constraints violated
+  
+  ```json
+  {
+    "detail": [
+      {
+        "loc": ["body", "items", 0, "recipient_name"],
+        "msg": "ensure this value has at least 2 characters",
+        "type": "value_error.any_str.min_length"
+      }
+    ]
+  }
+  ```
+</ResponseField>
+
+---
+
+## GET /api/queue/
+
+Get all queue items from the last 24 hours for the current user, including their status and position in the queue.
+
+<Info>
+  Poll this endpoint every 2 seconds while queue items are active. Position calculation uses efficient SQL window functions to avoid N+1 query problems.
+</Info>
+
+### Authentication
+
+Requires valid JWT token from Supabase Auth in the `Authorization` header.
+
+### Request Example
+
+```bash
+curl -X GET https://scribeapi.manitmishra.com/api/queue/ \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Response
+
+Returns an array of queue item objects sorted by creation time (oldest first, FIFO order).
+
+<ResponseField name="id" type="string (UUID)">
+  Queue item's unique identifier
+</ResponseField>
+
+<ResponseField name="recipient_name" type="string">
+  Name of the email recipient
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  Current status: `pending`, `processing`, `completed`, or `failed`
+</ResponseField>
+
+<ResponseField name="position" type="integer | null">
+  Position in queue (1-indexed). Only present for `pending` items. `null` for processing/completed/failed items.
+</ResponseField>
+
+<ResponseField name="email_id" type="string (UUID) | null">
+  ID of the generated email. Only present when status is `completed`.
+</ResponseField>
+
+<ResponseField name="error_message" type="string | null">
+  Error details if status is `failed`. Truncated to 1000 characters.
+</ResponseField>
+
+<ResponseField name="current_step" type="string | null">
+  Current pipeline step being executed. Only present when status is `processing`.
+</ResponseField>
+
+<ResponseField name="created_at" type="string (ISO 8601)">
+  Timestamp when the item was queued
+</ResponseField>
+
+### Response Example
+
+```json
+[
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "recipient_name": "Dr. Jane Smith",
+    "status": "completed",
+    "position": null,
+    "email_id": "660e8400-e29b-41d4-a716-446655440010",
+    "error_message": null,
+    "current_step": null,
+    "created_at": "2025-01-24T10:30:00Z"
+  },
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440001",
+    "recipient_name": "Prof. John Doe",
+    "status": "processing",
+    "position": null,
+    "email_id": null,
+    "error_message": null,
+    "current_step": "web_scraper",
+    "created_at": "2025-01-24T10:30:05Z"
+  },
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440002",
+    "recipient_name": "Dr. Alice Johnson",
+    "status": "pending",
+    "position": 1,
+    "email_id": null,
+    "error_message": null,
+    "current_step": null,
+    "created_at": "2025-01-24T10:30:10Z"
+  },
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440003",
+    "recipient_name": "Prof. Bob Williams",
+    "status": "pending",
+    "position": 2,
+    "email_id": null,
+    "error_message": null,
+    "current_step": null,
+    "created_at": "2025-01-24T10:30:15Z"
+  },
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440004",
+    "recipient_name": "Dr. Carol Martinez",
+    "status": "failed",
+    "position": null,
+    "email_id": null,
+    "error_message": "TimeoutError: Web scraping timed out after 45 seconds",
+    "current_step": null,
+    "created_at": "2025-01-24T10:29:00Z"
+  }
+]
+```
+
+### Queue Status Values
+
+<ResponseField name="pending">
+  Item is waiting in queue. Check `position` field for queue position.
+</ResponseField>
+
+<ResponseField name="processing">
+  Item is currently being processed. Check `current_step` for pipeline progress.
+</ResponseField>
+
+<ResponseField name="completed">
+  Email generation completed successfully. Use `email_id` to retrieve the email via GET `/api/email/{email_id}`.
+</ResponseField>
+
+<ResponseField name="failed">
+  Email generation failed. Check `error_message` for details.
+</ResponseField>
+
+### Implementation Notes
+
+- **24-Hour Window**: Only items from the last 24 hours are returned to avoid returning stale data
+- **FIFO Ordering**: Items are processed in order of `created_at` timestamp (oldest first)
+- **Position Calculation**: Uses SQL window function `ROW_NUMBER()` for efficient position calculation without N+1 queries
+- **Polling Strategy**: Frontend polls every 2 seconds while `pending` or `processing` items exist
+
+### Error Responses
+
+<ResponseField name="401 Unauthorized">
+  Invalid or missing JWT token
+</ResponseField>
+
+---
+
+## DELETE /api/queue/{id}
+
+Cancel a pending queue item. Only items with status `pending` can be cancelled. Processing, completed, or failed items cannot be cancelled.
+
+<Warning>
+  You can only cancel items with status `pending`. Attempting to cancel items in other states will result in a 400 error.
+</Warning>
+
+### Authentication
+
+Requires valid JWT token from Supabase Auth in the `Authorization` header.
+
+### Path Parameters
+
+<ParamField path="id" type="string (UUID)" required>
+  The unique identifier of the queue item to cancel
+</ParamField>
+
+### Request Example
+
+```bash
+curl -X DELETE https://scribeapi.manitmishra.com/api/queue/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Response
+
+<ResponseField name="message" type="string">
+  Confirmation message that the queue item was cancelled
+</ResponseField>
+
+### Response Example
+
+```json
+{
+  "message": "Queue item cancelled"
+}
+```
+
+### Cancellation Flow
+
+1. **Validation**: Checks that item exists, belongs to user, and has status `pending`
+2. **Celery Revoke**: Revokes the Celery task (graceful, terminate=false)
+3. **Database Delete**: Removes the queue item from the database
+4. **Response**: Returns confirmation message
+
+### Error Responses
+
+<ResponseField name="400 Bad Request (Invalid UUID)**">
+  Invalid queue item ID format
+  
+  ```json
+  {
+    "detail": "Invalid queue item ID format: badly formed hexadecimal UUID string"
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="400 Bad Request (Cannot Cancel)">
+  Item status is not `pending` (already processing, completed, or failed)
+  
+  ```json
+  {
+    "detail": "Cannot cancel item with status 'processing'"
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="401 Unauthorized">
+  Invalid or missing JWT token
+</ResponseField>
+
+<ResponseField name="404 Not Found">
+  Queue item not found or user doesn't have permission to access it
+  
+  ```json
+  {
+    "detail": "Queue item not found"
+  }
+  ```
+</ResponseField>
+
+---
+
+## Queue Implementation Details
+
+### Database Schema
+
+Queue items are stored in the `queue_items` table with the following key fields:
+
+- **Status Enum**: `pending` | `processing` | `completed` | `failed`
+- **Relationships**: Foreign keys to `users` (CASCADE delete) and `emails` (SET NULL)
+- **Indexes**: Composite index on `(user_id, status, created_at)` for efficient queries
+
+### Celery Configuration
+
+- **Queue Name**: `email_default`
+- **Concurrency**: 1 (sequential processing to avoid rate limits)
+- **Task Timeout**: 180 seconds (3 minutes) per email
+- **Retry Policy**: 3 attempts with exponential backoff
+
+### Error Handling
+
+- **Truncation**: Error messages truncated to 1000 characters to prevent database bloat
+- **Step Tracking**: `current_step` field updated as pipeline progresses
+- **Graceful Degradation**: Failed items remain in queue with error details for debugging
+
+### Performance Optimization
+
+- **Single Query Position Calculation**: Uses SQL window function instead of N separate queries
+- **24-Hour Filter**: Reduces query size by only showing recent items
+- **Index Usage**: Leverages composite indexes for fast user-scoped queries

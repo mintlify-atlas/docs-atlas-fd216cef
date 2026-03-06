@@ -1,0 +1,368 @@
+---
+title: 'Template Types'
+description: 'Classification of email templates: RESEARCH, BOOK, and GENERAL'
+icon: 'tags'
+---
+
+## Overview
+
+Scribe automatically classifies email templates into three types to determine the appropriate enrichment strategy during pipeline execution.
+
+<Info>
+  **Classification happens in Step 1** (TemplateParser) using Claude Haiku 4.5 with structured output.
+</Info>
+
+## TemplateType Enum
+
+```python pipeline/models/core.py
+class TemplateType(str, Enum):
+    """Template type: RESEARCH (papers), BOOK (books), GENERAL (other)."""
+    RESEARCH = "research"
+    BOOK = "book"
+    GENERAL = "general"
+```
+
+<Note>
+  Inheriting from both `str` and `Enum` enables type-safe comparisons and automatic JSON serialization:
+  ```python
+  if pipeline_data.template_type == TemplateType.RESEARCH:
+      # Fetch ArXiv papers
+  ```
+</Note>
+
+## Template Type Descriptions
+
+<AccordionGroup>
+  <Accordion title="RESEARCH" icon="microscope">
+    Templates that reference academic papers, publications, or research work.
+    
+    **Examples**:
+    - "I read your paper on {{research_topic}}"
+    - "Your work on {{paper_title}} inspired me"
+    - "I'm interested in your research on {{field}}"
+    
+    **Enrichment**:
+    - ArXiv papers fetched in Step 3 (ArxivEnricher)
+    - Top 5 most relevant papers selected
+    - Papers used for email personalization
+  </Accordion>
+
+  <Accordion title="BOOK" icon="book">
+    Templates that mention books, textbooks, or published works (non-academic).
+    
+    **Examples**:
+    - "I loved your book {{book_title}}"
+    - "Your textbook on {{subject}} helped me"
+    - "I'm a fan of your writing, especially {{book_name}}"
+    
+    **Enrichment**:
+    - ArXiv enrichment **skipped**
+    - Web scraping focuses on published books
+    - Goodreads/Amazon links prioritized
+  </Accordion>
+
+  <Accordion title="GENERAL" icon="circle">
+    Templates that don't mention papers or books. Generic outreach or networking.
+    
+    **Examples**:
+    - "I'd love to chat about {{topic}}"
+    - "Your work at {{company}} caught my attention"
+    - "I'm reaching out about {{opportunity}}"
+    
+    **Enrichment**:
+    - ArXiv enrichment **skipped**
+    - Web scraping focuses on professional profiles
+    - LinkedIn, university pages, personal websites prioritized
+  </Accordion>
+</AccordionGroup>
+
+## Classification Logic
+
+The TemplateParser step uses an LLM to analyze the template and classify it:
+
+```python pipeline/steps/template_parser/main.py
+class TemplateParserStep(BasePipelineStep):
+    """Analyze template and extract search parameters."""
+
+    async def _execute_step(self, data: PipelineData) -> StepResult:
+        agent = create_agent(
+            model="anthropic:claude-haiku-4-5",
+            output_type=TemplateAnalysis,  # Pydantic model with template_type field
+            temperature=0.1,  # Low temperature for consistent classification
+            max_tokens=2000
+        )
+
+        prompt = f"""
+        Analyze this email template and recipient information:
+
+        Template: {data.email_template}
+        Recipient: {data.recipient_name}
+        Interest: {data.recipient_interest}
+
+        Classify the template type:
+        - RESEARCH: Mentions papers, publications, research, studies, or academic work
+        - BOOK: Mentions books, textbooks, or published non-academic works
+        - GENERAL: Doesn't mention papers or books (networking, opportunities, etc.)
+
+        Extract:
+        1. Template type (RESEARCH, BOOK, or GENERAL)
+        2. Search terms for finding information about the recipient
+        3. Placeholders used ({{name}}, {{research}}, etc.)
+        """
+
+        result = await agent.run(prompt)
+
+        # Update PipelineData with classification
+        data.template_type = result.data.template_type
+        data.search_terms = result.data.search_terms
+        data.template_analysis = result.data.model_dump()
+
+        return StepResult(success=True, step_name=self.step_name)
+```
+
+## Classification Examples
+
+### RESEARCH Template
+
+**Input**:
+```text
+Template: "Hey {{name}}, I read your paper on {{research}} and found it fascinating!"
+Recipient: Dr. Jane Smith
+Interest: machine learning
+```
+
+**Classification**:
+```python
+{
+    "template_type": "RESEARCH",
+    "confidence": 0.95,
+    "reasoning": "Template explicitly mentions 'paper' and '{{research}}' placeholder",
+    "search_terms": [
+        "Dr. Jane Smith machine learning papers",
+        "Jane Smith publications",
+        "Jane Smith research"
+    ]
+}
+```
+
+**Pipeline Behavior**:
+- ✅ Step 3 (ArxivEnricher) **executes**
+- Fetches top 5 ArXiv papers by Dr. Jane Smith on machine learning
+- Email mentions specific paper titles
+
+### BOOK Template
+
+**Input**:
+```text
+Template: "I loved your book {{book_title}}! It changed my perspective on {{topic}}."
+Recipient: Malcolm Gladwell
+Interest: psychology
+```
+
+**Classification**:
+```python
+{
+    "template_type": "BOOK",
+    "confidence": 0.92,
+    "reasoning": "Template mentions 'book' and {{book_title}} placeholder",
+    "search_terms": [
+        "Malcolm Gladwell books",
+        "Malcolm Gladwell psychology",
+        "Malcolm Gladwell publications"
+    ]
+}
+```
+
+**Pipeline Behavior**:
+- ❌ Step 3 (ArxivEnricher) **skipped**
+- Web scraper prioritizes book titles, reviews, Goodreads
+- Email mentions specific book titles from web scraping
+
+### GENERAL Template
+
+**Input**:
+```text
+Template: "Hi {{name}}, I'd love to connect about opportunities in {{field}}."
+Recipient: Elon Musk
+Interest: space technology
+```
+
+**Classification**:
+```python
+{
+    "template_type": "GENERAL",
+    "confidence": 0.88,
+    "reasoning": "Template doesn't mention papers or books, focuses on networking",
+    "search_terms": [
+        "Elon Musk space technology",
+        "Elon Musk SpaceX",
+        "Elon Musk career"
+    ]
+}
+```
+
+**Pipeline Behavior**:
+- ❌ Step 3 (ArxivEnricher) **skipped**
+- Web scraper prioritizes LinkedIn, company pages, recent news
+- Email mentions recent achievements or roles
+
+## Impact on Pipeline Execution
+
+### Step 3: ArxivEnricher Conditional Logic
+
+```python pipeline/steps/arxiv_helper/main.py
+class ArxivEnricherStep(BasePipelineStep):
+    """Conditionally fetch ArXiv papers based on template type."""
+
+    async def _execute_step(self, data: PipelineData) -> StepResult:
+        # Only execute for RESEARCH templates
+        if data.template_type != TemplateType.RESEARCH:
+            logfire.info(
+                f"Skipping ArXiv enrichment for template type: {data.template_type}",
+                task_id=data.task_id
+            )
+            return StepResult(
+                success=True,
+                step_name=self.step_name,
+                metadata={"papers_fetched": 0, "reason": "non-research template"}
+            )
+
+        # Fetch papers for RESEARCH templates
+        papers = await self._fetch_arxiv_papers(
+            author=data.recipient_name,
+            interest=data.recipient_interest
+        )
+
+        data.arxiv_papers = papers[:5]  # Top 5 papers
+        data.enrichment_metadata = {
+            "papers_fetched": len(papers),
+            "papers_used": len(data.arxiv_papers)
+        }
+
+        return StepResult(success=True, step_name=self.step_name)
+```
+
+### Step 4: Email Composer Context Building
+
+```python pipeline/steps/email_composer/main.py
+class EmailComposerStep(BasePipelineStep):
+    """Generate final email with type-aware context."""
+
+    async def _execute_step(self, data: PipelineData) -> StepResult:
+        # Build context based on template type
+        context = {
+            "template": data.email_template,
+            "recipient_name": data.recipient_name,
+            "recipient_interest": data.recipient_interest,
+            "scraped_content": data.scraped_content,
+            "template_type": data.template_type,
+        }
+
+        # Add papers only for RESEARCH type
+        if data.template_type == TemplateType.RESEARCH:
+            context["arxiv_papers"] = [
+                {
+                    "title": p["title"],
+                    "abstract": p["abstract"][:500],  # Truncate
+                    "year": p["year"],
+                }
+                for p in data.arxiv_papers[:3]  # Top 3 papers
+            ]
+            context["instruction"] = "Reference specific paper titles in the email."
+        else:
+            context["instruction"] = "Use information from web scraping for personalization."
+
+        # Generate email with Sonnet
+        email = await self._generate_email(context)
+
+        # Validate with type-aware checks
+        validation = self._validate_email(
+            email=email,
+            template_type=data.template_type,
+            has_papers=len(data.arxiv_papers) > 0
+        )
+
+        # Write to database
+        email_id = await self._write_to_database(data, email)
+
+        return StepResult(success=True, step_name=self.step_name)
+```
+
+## JobStatus Enum
+
+While template types classify the **content**, job status tracks the **execution state** of the pipeline:
+
+```python pipeline/models/core.py
+class JobStatus(Enum):
+    """Pipeline job status for Celery task state management."""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+```
+
+<Warning>
+  **Don't confuse `JobStatus` with `QueueStatus`**: `JobStatus` is for Celery task state (used in pipeline execution), while `QueueStatus` is for database queue items (used in API responses).
+</Warning>
+
+## Performance Impact
+
+### Execution Time by Type
+
+| Template Type | Avg Time | ArXiv Call? | Cost per Email |
+|---------------|----------|-------------|----------------|
+| RESEARCH | 10.4s | ✅ Yes | $0.027 |
+| BOOK | 9.6s | ❌ No | $0.024 |
+| GENERAL | 9.6s | ❌ No | $0.024 |
+
+**Key Insight**: RESEARCH templates add ~0.8s for ArXiv API call but provide significantly better personalization for academic outreach.
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Be Explicit" icon="spell-check">
+    Use clear keywords like "paper", "research", "book" in templates for accurate classification.
+  </Card>
+  
+  <Card title="Test Classification" icon="flask">
+    Review generated emails to verify the classifier chose the correct type for your template.
+  </Card>
+  
+  <Card title="Match Recipient" icon="bullseye">
+    Use RESEARCH for academics, BOOK for authors, GENERAL for industry professionals.
+  </Card>
+  
+  <Card title="Monitor Accuracy" icon="chart-line">
+    Track misclassifications in Logfire and adjust prompts if needed.
+  </Card>
+</CardGroup>
+
+## Debugging Template Classification
+
+View classification decisions in the pipeline metadata:
+
+```python
+# After email generation
+email = db.query(Email).filter(Email.id == email_id).first()
+
+print(email.metadata)
+# Output:
+# {
+#   "template_type": "RESEARCH",
+#   "classification_confidence": 0.95,
+#   "papers_used": ["Neural Networks for CV", "Deep Learning in Healthcare"],
+#   "arxiv_papers_fetched": 5,
+#   "step_timings": {"template_parser": 1.2, "arxiv_helper": 0.8, ...}
+# }
+```
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Pipeline Architecture" icon="diagram-project" href="/concepts/pipeline">
+    See how template types affect pipeline execution flow
+  </Card>
+  <Card title="Queue System" icon="list-check" href="/concepts/queue-system">
+    Learn how JobStatus differs from template classification
+  </Card>
+</CardGroup>

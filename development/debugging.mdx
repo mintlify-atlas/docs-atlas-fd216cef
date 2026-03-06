@@ -1,0 +1,576 @@
+---
+title: "Debugging Guide"
+description: "Debug Scribe Backend using Logfire traces, FastAPI docs, and Celery inspection"
+---
+
+## Overview
+
+Scribe provides comprehensive debugging tools across all layers:
+
+- **Logfire** for distributed tracing and LLM call inspection
+- **FastAPI /docs** for interactive API testing
+- **Celery Flower** for task queue monitoring
+- **Python debugger** for breakpoint debugging
+
+## Logfire Observability
+
+Logfire provides real-time distributed tracing with automatic pydantic-ai instrumentation.
+
+### Viewing Traces
+
+<Steps>
+  <Step title="Access Logfire Dashboard">
+    Visit [logfire.pydantic.dev](https://logfire.pydantic.dev) and sign in.
+  </Step>
+
+  <Step title="Find Your Task">
+    Search by `task_id` to see all operations for a specific email generation:
+    
+    ```
+    task_id:"abc-123-def-456"
+    ```
+  </Step>
+
+  <Step title="Inspect Nested Spans">
+    Each pipeline step creates nested spans showing:
+    - Step name and duration
+    - Input/output data
+    - LLM calls (model, tokens, cost, latency)
+    - Errors with full stack traces
+  </Step>
+</Steps>
+
+### Example Trace Structure
+
+```
+📊 generate_email_task (10.4s)
+  ├─ 🔍 template_parser (1.2s)
+  │   ├─ 🤖 anthropic.chat (0.8s)
+  │   │   ├─ model: claude-haiku-4-5
+  │   │   ├─ tokens: 450 input / 120 output
+  │   │   ├─ cost: $0.0015
+  │   │   └─ response: {search_terms: [...], template_type: "research"}
+  │   └─ ✅ template_parser_complete
+  ├─ 🌐 web_scraper (5.3s)
+  │   ├─ google_search (0.5s)
+  │   ├─ playwright_scrape (3.2s)
+  │   └─ 🤖 summarize_content (1.1s)
+  ├─ 📚 arxiv_helper (0.8s)
+  │   └─ fetch_papers (0.6s)
+  └─ ✉️ email_composer (3.1s)
+      ├─ 🤖 anthropic.chat (2.8s)
+      │   ├─ model: claude-sonnet-4-5
+      │   ├─ tokens: 2400 input / 380 output
+      │   └─ cost: $0.018
+      └─ 💾 db_insert (0.2s)
+```
+
+### Custom Logging in Code
+
+Add structured logging to your code:
+
+```python
+import logfire
+
+# Simple log
+logfire.info("Processing request", user_id=user_id, task_id=task_id)
+
+# Custom span for timing
+with logfire.span("custom_operation", metadata={"key": "value"}):
+    result = expensive_operation()
+    logfire.info("Operation completed", duration=result.duration)
+
+# Log errors
+try:
+    risky_operation()
+except Exception as e:
+    logfire.error("Operation failed", error=str(e), exc_info=True)
+```
+
+### Filtering Logs
+
+```python
+# Filter by severity
+level:ERROR
+
+# Filter by step
+step_name:"template_parser"
+
+# Filter by user
+user_id:"550e8400-e29b-41d4-a716-446655440000"
+
+# Combine filters
+task_id:"abc-123" AND level:ERROR
+
+# Time range
+timestamp:[2024-01-20 TO 2024-01-21]
+```
+
+## FastAPI Interactive Docs
+
+FastAPI automatically generates interactive API documentation.
+
+### Accessing /docs
+
+<Steps>
+  <Step title="Start the Server">
+    ```bash
+    uvicorn main:app --reload --host 0.0.0.0 --port 8000
+    ```
+  </Step>
+
+  <Step title="Open in Browser">
+    Navigate to: http://localhost:8000/docs
+  </Step>
+
+  <Step title="Test Endpoints">
+    - Click any endpoint to expand
+    - Click "Try it out"
+    - Fill in parameters
+    - Click "Execute"
+    - View response with status code, headers, and body
+  </Step>
+</Steps>
+
+### Testing Protected Endpoints
+
+```bash
+# 1. Get JWT token from Supabase (via frontend or API)
+JWT_TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+
+# 2. In /docs, click "Authorize" button
+# 3. Enter: Bearer <JWT_TOKEN>
+# 4. Click "Authorize"
+# 5. All requests now include Authorization header
+```
+
+### Example: Testing Email Generation
+
+<Steps>
+  <Step title="Initialize User">
+    POST `/api/user/init`
+    ```json
+    {
+      "display_name": "Test User"
+    }
+    ```
+  </Step>
+
+  <Step title="Generate Email">
+    POST `/api/email/generate`
+    ```json
+    {
+      "email_template": "Hi {{name}}, love your work on {{research}}!",
+      "recipient_name": "Dr. Jane Smith",
+      "recipient_interest": "machine learning"
+    }
+    ```
+
+    Response:
+    ```json
+    {
+      "task_id": "abc-123-def-456"
+    }
+    ```
+  </Step>
+
+  <Step title="Check Status">
+    GET `/api/email/status/{task_id}`
+
+    Response:
+    ```json
+    {
+      "status": "SUCCESS",
+      "result": {
+        "email_id": "550e8400-e29b-41d4-a716-446655440000"
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+## Celery Task Debugging
+
+### Flower Dashboard
+
+Flower provides a web UI for monitoring Celery workers and tasks.
+
+```bash
+# Start Flower
+celery -A celery_config.celery_app flower
+
+# Access dashboard
+open http://localhost:5555
+```
+
+**Features:**
+- Active tasks and worker status
+- Task history with timing
+- Failed task inspection with tracebacks
+- Worker pool configuration
+- Broker (Redis) statistics
+
+### Inspecting Task State
+
+```python
+from celery.result import AsyncResult
+from celery_config import celery_app
+
+# Get task by ID
+task = AsyncResult('task-id-here', app=celery_app)
+
+# Check state
+print(task.state)  # PENDING, STARTED, SUCCESS, FAILURE, RETRY
+
+# Get result (if successful)
+if task.successful():
+    print(task.result)
+
+# Get error info (if failed)
+if task.failed():
+    print(task.info)  # Exception details
+    print(task.traceback)  # Full stack trace
+```
+
+### Worker Logs
+
+```bash
+# Start worker with debug logging
+celery -A celery_config.celery_app worker \
+  --loglevel=debug \
+  --queues=email_default \
+  --concurrency=1
+
+# Inspect active queues
+celery -A celery_config.celery_app inspect active_queues
+
+# Inspect active tasks
+celery -A celery_config.celery_app inspect active
+
+# Inspect registered tasks
+celery -A celery_config.celery_app inspect registered
+
+# Worker statistics
+celery -A celery_config.celery_app inspect stats
+```
+
+### Task Stuck in PENDING
+
+If tasks remain PENDING indefinitely:
+
+```bash
+# 1. Check if worker is running
+celery -A celery_config.celery_app inspect active
+
+# 2. Check Redis connection
+redis-cli ping  # Should respond "PONG"
+
+# 3. Check worker logs for errors
+celery -A celery_config.celery_app worker --loglevel=info
+
+# 4. Restart worker
+pkill -f celery
+make celery-worker
+```
+
+## Python Debugger
+
+### Using Breakpoints
+
+```python
+# Add breakpoint in code
+def some_function():
+    data = get_data()
+    breakpoint()  # Execution stops here (Python 3.7+)
+    process_data(data)
+
+# Or use pdb directly
+import pdb; pdb.set_trace()
+```
+
+**Common pdb Commands:**
+```
+n (next)       - Execute next line
+s (step)       - Step into function
+c (continue)   - Continue execution
+pp variable    - Pretty-print variable
+l (list)       - Show source code
+w (where)      - Show stack trace
+q (quit)       - Exit debugger
+```
+
+### VS Code Debugger
+
+Create `.vscode/launch.json`:
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: FastAPI",
+      "type": "python",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": [
+        "main:app",
+        "--reload",
+        "--host", "0.0.0.0",
+        "--port", "8000"
+      ],
+      "jinja": true,
+      "justMyCode": false
+    },
+    {
+      "name": "Python: Current Test",
+      "type": "python",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        "${file}",
+        "-v",
+        "-s"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}
+```
+
+## Database Debugging
+
+### Enable SQL Logging
+
+```python
+import logging
+
+# Show all SQL queries
+logging.basicConfig()
+logging.getLogger('sqlalchemy.engine').setLevel(logging.INFO)
+```
+
+### Inspect Queries
+
+```python
+from sqlalchemy import select
+from models.email import Email
+
+# Build query
+query = select(Email).where(Email.user_id == user_id)
+
+# Print SQL
+print(str(query.compile(compile_kwargs={"literal_binds": True})))
+
+# Execute
+result = await db.execute(query)
+rows = result.scalars().all()
+print(f"Found {len(rows)} rows")
+```
+
+### Check Connection Status
+
+```bash
+# Health check endpoint
+curl http://localhost:8000/health
+
+# Response shows database status
+{
+  "status": "healthy",
+  "database": "connected",
+  "service": "scribe-api",
+  "version": "1.0.0"
+}
+```
+
+## Common Issues & Solutions
+
+<Accordion title="Redis Connection Error">
+  **Symptom:**
+  ```
+  redis.exceptions.ConnectionError: Error connecting to Redis
+  ```
+
+  **Solution:**
+  ```bash
+  # Check if Redis is running
+  redis-cli ping  # Should respond "PONG"
+
+  # Start Redis
+  make redis-start
+
+  # Check logs
+  redis-cli info
+  ```
+</Accordion>
+
+<Accordion title="Playwright Browser Error">
+  **Symptom:**
+  ```
+  playwright._impl._api_types.Error: Executable doesn't exist
+  ```
+
+  **Solution:**
+  ```bash
+  # Install Chromium
+  playwright install chromium
+
+  # Verify installation
+  playwright --version
+  ```
+</Accordion>
+
+<Accordion title="Module Import Errors">
+  **Symptom:**
+  ```
+  ModuleNotFoundError: No module named 'pipeline'
+  ```
+
+  **Solution:**
+  ```bash
+  # Run from project root
+  cd /path/to/pythonserver
+
+  # Activate venv
+  source venv/bin/activate
+
+  # Verify Python path
+  which python  # Should be venv/bin/python
+  ```
+</Accordion>
+
+<Accordion title="Task Stuck in PENDING">
+  **Symptom:**
+  Task never transitions from PENDING state.
+
+  **Solution:**
+  ```bash
+  # 1. Check worker is running
+  celery -A celery_config.celery_app inspect active
+
+  # 2. Check Redis
+  redis-cli ping
+
+  # 3. Restart worker
+  make celery-worker
+
+  # 4. Check task was dispatched correctly
+  # Verify celery_task_id is set in queue_items table
+  ```
+</Accordion>
+
+<Accordion title="Database Connection Timeout">
+  **Symptom:**
+  ```
+  sqlalchemy.exc.OperationalError: timeout expired
+  ```
+
+  **Solution:**
+  ```bash
+  # 1. Check Supabase status
+  curl https://status.supabase.com
+
+  # 2. Verify connection string
+  # - DB_HOST should use .pooler.supabase.com
+  # - DB_PORT should be 6543 for transaction pooler
+
+  # 3. Test connection manually
+  psql "postgresql://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME?sslmode=require"
+
+  # 4. Increase timeout in config/settings.py
+  # db_connect_timeout: 30 → 60
+  ```
+</Accordion>
+
+<Accordion title="LLM API Rate Limit">
+  **Symptom:**
+  ```
+  anthropic.RateLimitError: 429 Too Many Requests
+  ```
+
+  **Solution:**
+  - Celery worker already runs with `concurrency=1` to prevent this
+  - Check your Anthropic dashboard for rate limits
+  - Consider switching to Fireworks AI (higher limits)
+  - Add retry logic with exponential backoff
+
+  ```python
+  from tenacity import retry, stop_after_attempt, wait_exponential
+
+  @retry(
+      stop=stop_after_attempt(3),
+      wait=wait_exponential(multiplier=1, min=4, max=10)
+  )
+  async def call_llm_with_retry():
+      return await agent.run(prompt)
+  ```
+</Accordion>
+
+## Performance Profiling
+
+### Timing Pipeline Steps
+
+Pipeline automatically records step timings:
+
+```python
+# Access timings from PipelineData
+print(pipeline_data.step_timings)
+# {
+#   "template_parser": 1.2,
+#   "web_scraper": 5.3,
+#   "arxiv_helper": 0.8,
+#   "email_composer": 3.1
+# }
+```
+
+### Memory Profiling
+
+```bash
+# Install memory_profiler
+pip install memory_profiler
+
+# Add decorator
+from memory_profiler import profile
+
+@profile
+def memory_intensive_function():
+    large_list = [i for i in range(1000000)]
+    return sum(large_list)
+
+# Run with profiler
+python -m memory_profiler script.py
+```
+
+### Database Query Profiling
+
+```python
+import time
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+
+@event.listens_for(Engine, "before_cursor_execute")
+def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    conn.info.setdefault('query_start_time', []).append(time.time())
+
+@event.listens_for(Engine, "after_cursor_execute")
+def after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    total = time.time() - conn.info['query_start_time'].pop(-1)
+    print(f"Query took {total:.3f}s: {statement[:100]}")
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Testing Guide" icon="flask" href="/development/testing">
+    Learn how to write comprehensive tests
+  </Card>
+  <Card title="Project Structure" icon="folder-tree" href="/development/project-structure">
+    Understand the codebase organization
+  </Card>
+  <Card title="Pipeline Deep Dive" icon="diagram-project" href="/pipeline/overview">
+    Explore the 4-step email generation pipeline
+  </Card>
+  <Card title="Deployment" icon="rocket" href="/deployment/overview">
+    Deploy to production (Raspberry Pi + Cloudflare)
+  </Card>
+</CardGroup>

@@ -1,0 +1,138 @@
+---
+title: "Introduction"
+description: "AI-powered cold email generation API with multi-step agentic pipeline for personalized academic outreach"
+---
+
+<img
+  className="block"
+  src="https://media.brand.dev/288cc7c4-5cef-4376-950b-bdf0083eedae.png"
+  alt="Scribe Backend"
+  style={{ maxWidth: '200px', margin: '0 auto 2rem' }}
+/>
+
+# Welcome to Scribe Backend
+
+Scribe is a production-ready cold email platform built with FastAPI that uses a sophisticated multi-step AI pipeline to generate personalized academic outreach emails. The system combines web scraping, academic paper research, and Claude AI to create contextually relevant emails based on customizable templates.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Multi-Step AI Pipeline" icon="workflow">
+    Four-stage agentic pipeline: template parsing, web scraping, academic enrichment, and email composition
+  </Card>
+  <Card title="Database-Backed Queue" icon="list-check">
+    Submit up to 100 email recipients at once with sequential processing and real-time status updates
+  </Card>
+  <Card title="Smart Web Scraping" icon="globe">
+    Playwright-powered headless browser with JavaScript support for dynamic content extraction
+  </Card>
+  <Card title="ArXiv Integration" icon="book">
+    Automatic academic paper discovery and citation for research-focused outreach
+  </Card>
+  <Card title="Type-Safe Architecture" icon="shield-check">
+    Pydantic models throughout with structured LLM outputs via pydantic-ai
+  </Card>
+  <Card title="Comprehensive Observability" icon="chart-line">
+    Logfire integration with LLM call tracking for cost, tokens, and latency
+  </Card>
+</CardGroup>
+
+## Tech Stack
+
+Scribe Backend is built with modern Python technologies:
+
+- **Backend**: FastAPI 0.109+, Python 3.13, Uvicorn
+- **Database**: PostgreSQL (Supabase), SQLAlchemy 2.0, Alembic
+- **Authentication**: Supabase Auth with JWT validation
+- **AI/ML**: Anthropic Claude (Haiku 4.5, Sonnet 4.5), pydantic-ai
+- **Task Queue**: Celery 5.3+, Redis 5.0+
+- **Web Scraping**: Playwright 1.56+, BeautifulSoup4, httpx
+- **Observability**: Logfire 4.14+ with auto-instrumentation
+
+## Quick Navigation
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get Scribe running in 5 minutes with step-by-step setup
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    Understand the system design and deployment architecture
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/overview">
+    Explore the complete REST API documentation
+  </Card>
+  <Card title="Pipeline Deep Dive" icon="diagram-project" href="/pipeline/introduction">
+    Learn about the 4-step email generation pipeline
+  </Card>
+</CardGroup>
+
+## Architecture Overview
+
+```
+┌─────────────────────┐
+│  Template Parser    │  Claude Haiku extracts search terms & classifies type
+│  (~1.2s)            │  Output: search_terms, template_type
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│   Web Scraper       │  Google Search + Playwright scraping + summarization
+│   (~5.3s)           │  Output: scraped_content, urls, metadata
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│  ArXiv Helper       │  Fetch academic papers (if RESEARCH type)
+│  (~0.8s)            │  Output: arxiv_papers[]
+└──────────┬──────────┘
+           │
+           ▼
+┌─────────────────────┐
+│  Email Composer     │  Claude Sonnet generates final email
+│  (~3.1s)            │  Output: final_email, writes to database
+└─────────────────────┘
+
+Total: ~10.4s
+```
+
+## Template Types
+
+Scribe supports three template types for different outreach scenarios:
+
+- **Research**: Includes research papers the professor has written
+- **Book**: Includes books the professor has published
+- **General**: General professional information about the professor
+
+<Note>
+The pipeline automatically classifies your template and adjusts the enrichment strategy accordingly.
+</Note>
+
+## Production Deployment
+
+The production backend is self-hosted on a Raspberry Pi with traffic routed through a Cloudflare Tunnel at `https://scribeapi.manitmishra.com`.
+
+<CardGroup cols={2}>
+  <Card title="Health Check" icon="heart-pulse">
+    `GET /health` - Check database connectivity and service status
+  </Card>
+  <Card title="API Documentation" icon="book-open">
+    `GET /docs` - Interactive Swagger UI for API exploration
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<Steps>
+  <Step title="Get Started">
+    Follow the [Quickstart guide](/quickstart) to set up your local development environment
+  </Step>
+  <Step title="Understand Core Concepts">
+    Learn about [authentication](/concepts/authentication), [queue system](/concepts/queue-system), and [template types](/concepts/template-types)
+  </Step>
+  <Step title="Explore the API">
+    Check out the [API Reference](/api/overview) for detailed endpoint documentation
+  </Step>
+  <Step title="Dive into the Pipeline">
+    Understand the [4-step pipeline](/pipeline/introduction) that powers email generation
+  </Step>
+</Steps>

@@ -1,0 +1,629 @@
+---
+title: Running Locally
+description: Start uvicorn server, Celery worker, Flower monitoring, and perform health checks
+---
+
+## Overview
+
+Scribe Backend consists of three main services that work together:
+
+1. **FastAPI Server** (uvicorn) - Handles HTTP requests and API endpoints
+2. **Celery Worker** - Processes background email generation tasks
+3. **Redis** - Message broker and result backend for Celery
+4. **Flower** (optional) - Web-based monitoring UI for Celery tasks
+
+<Note>
+  All services must be running for the application to function properly. This guide shows both quick-start and manual startup methods.
+</Note>
+
+---
+
+## Prerequisites
+
+Before starting, ensure you've completed:
+
+- [Installation](/guides/installation) - Python 3.13+, dependencies, Playwright
+- [Configuration](/guides/configuration) - `.env` file with API keys
+- [Database Setup](/guides/database-setup) - Alembic migrations applied
+
+---
+
+## Quick Start (Recommended)
+
+Start all services with a single command:
+
+```bash
+# Activate virtual environment
+source venv/bin/activate
+
+# Start Redis (background)
+make redis-start
+
+# Start FastAPI + Celery worker together
+make serve
+```
+
+**What `make serve` does:**
+- Starts uvicorn server on port 8000
+- Starts Celery worker with concurrency=1
+- Displays logs from both services in the terminal
+
+<Note>
+  Use **Ctrl+C** to stop both services. Redis continues running in the background.
+</Note>
+
+---
+
+## Manual Start (Detailed Control)
+
+For debugging or customization, start services individually:
+
+<Steps>
+  <Step title="Start Redis">
+    Redis must be running before starting Celery:
+
+    <CodeGroup>
+      ```bash macOS (Homebrew)
+      brew services start redis
+      # Or: redis-server --daemonize yes
+      ```
+
+      ```bash Linux (systemd)
+      sudo systemctl start redis
+      ```
+
+      ```bash Manual start
+      redis-server --daemonize yes
+      ```
+    </CodeGroup>
+
+    **Verify Redis is running:**
+    ```bash
+    redis-cli ping
+    # Expected: PONG
+    ```
+  </Step>
+
+  <Step title="Start FastAPI Server">
+    Open a terminal and start the development server with hot reload:
+
+    ```bash
+    source venv/bin/activate
+    uvicorn main:app --reload --host 0.0.0.0 --port 8000
+    ```
+
+    **Expected output:**
+    ```
+    INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+    INFO:     Started reloader process [12345] using StatReload
+    INFO:     Started server process [12346]
+    INFO:     Waiting for application startup.
+    INFO:     Application startup complete.
+    ```
+
+    <Note>
+      The `--reload` flag enables automatic reloading when code changes are detected. Remove this in production.
+    </Note>
+  </Step>
+
+  <Step title="Start Celery Worker">
+    Open a **new terminal** and start the Celery worker:
+
+    ```bash
+    source venv/bin/activate
+    celery -A celery_config.celery_app worker --loglevel=info --queues=email_default --concurrency=1
+    ```
+
+    **Expected output:**
+    ```
+    celery@hostname v5.3.0 (emerald-rush)
+    
+    [config]
+    .> app:         scribe:0x...
+    .> transport:   redis://localhost:6379/0
+    .> results:     redis://localhost:6379/1
+    .> concurrency: 1 (solo)
+    .> task events: ON
+    
+    [queues]
+    .> email_default    exchange=email_default(direct) key=email_default
+    
+    [tasks]
+      . tasks.email_tasks.generate_email_task
+    
+    [2025-01-24 10:30:00,000: INFO/MainProcess] Connected to redis://localhost:6379/0
+    [2025-01-24 10:30:00,100: INFO/MainProcess] celery@hostname ready.
+    ```
+
+    <Warning>
+      **Concurrency=1** is critical for memory-constrained environments (Raspberry Pi). Each task uses ~400MB with Playwright browsers.
+    </Warning>
+  </Step>
+
+  <Step title="Start Flower Monitoring (Optional)">
+    Open a **third terminal** for the Flower UI:
+
+    ```bash
+    source venv/bin/activate
+    celery -A celery_config.celery_app flower
+    ```
+
+    **Access Flower:**
+    - URL: http://localhost:5555
+    - View: Active tasks, worker stats, task history, success/failure rates
+  </Step>
+</Steps>
+
+---
+
+## Service Configuration
+
+### FastAPI Server (uvicorn)
+
+**Development:**
+```bash
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+**Production:**
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 120 --workers 1
+```
+
+**Key Options:**
+- `--reload`: Enable hot reload (development only)
+- `--host 0.0.0.0`: Listen on all network interfaces
+- `--port 8000`: HTTP port
+- `--timeout-keep-alive 120`: Keep-alive timeout for long-polling clients
+- `--workers 1`: Number of worker processes (increase for production)
+
+---
+
+### Celery Worker
+
+**Standard Configuration:**
+```bash
+celery -A celery_config.celery_app worker \
+  --loglevel=info \
+  --queues=email_default \
+  --concurrency=1 \
+  --pool=solo
+```
+
+**Options Explained:**
+
+| Option | Value | Purpose |
+|--------|-------|----------|
+| `-A` | `celery_config.celery_app` | Celery app instance |
+| `--loglevel` | `info` | Logging verbosity (debug, info, warning, error) |
+| `--queues` | `email_default` | Queues to consume from |
+| `--concurrency` | `1` | Number of parallel tasks (1 for Raspberry Pi) |
+| `--pool` | `solo` | Execution pool (solo = single-threaded, memory efficient) |
+
+<Note>
+  **Memory Optimization:** Using `--pool=solo` and `--concurrency=1` keeps memory usage under 512MB, ideal for Raspberry Pi deployments.
+</Note>
+
+---
+
+### Redis Configuration
+
+**Default Configuration:**
+```bash
+# .env file
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0  # Celery broker
+REDIS_PASSWORD=
+```
+
+**Redis DB Usage:**
+- **DB 0**: Celery broker (task queue)
+- **DB 1**: Celery result backend (task state + results)
+
+**Check Redis Status:**
+```bash
+redis-cli info
+```
+
+---
+
+## Health Checks
+
+Verify all services are running correctly:
+
+### FastAPI Health Check
+
+```bash
+curl http://localhost:8000/health
+```
+
+**Expected Response:**
+```json
+{
+  "status": "healthy",
+  "service": "scribe-api",
+  "version": "1.0.0",
+  "database": "connected",
+  "environment": "development"
+}
+```
+
+<Accordion title="Health check failed">
+  **Possible causes:**
+  - Database connection failed → Check `.env` database credentials
+  - Supabase service unreachable → Verify `SUPABASE_URL`
+  - Missing environment variables → Review `.env` file
+
+  **Response when degraded:**
+  ```json
+  {
+    "status": "degraded",
+    "database": "disconnected"
+  }
+  ```
+</Accordion>
+
+---
+
+### API Documentation
+
+FastAPI auto-generates interactive API docs:
+
+- **Swagger UI:** http://localhost:8000/docs
+- **ReDoc:** http://localhost:8000/redoc
+
+<Note>
+  The interactive docs allow you to test API endpoints directly from the browser. JWT authentication is supported via the "Authorize" button.
+</Note>
+
+---
+
+### Celery Worker Health
+
+Check worker status using Celery's inspect commands:
+
+```bash
+# List active workers
+celery -A celery_config.celery_app inspect active
+
+# Check registered tasks
+celery -A celery_config.celery_app inspect registered
+
+# View worker stats
+celery -A celery_config.celery_app inspect stats
+```
+
+**Expected Output:**
+```json
+{
+  "celery@hostname": {
+    "active": [],
+    "registered": [
+      "tasks.email_tasks.generate_email_task",
+      "health_check"
+    ],
+    "stats": {
+      "total": {"tasks.email_tasks.generate_email_task": 10},
+      "pool": {"max-concurrency": 1}
+    }
+  }
+}
+```
+
+---
+
+### Flower Monitoring Dashboard
+
+If Flower is running, access comprehensive monitoring:
+
+**URL:** http://localhost:5555
+
+**Features:**
+- Real-time task progress
+- Worker resource usage (CPU, memory)
+- Task success/failure rates
+- Task execution history
+- Broker connection status
+
+<Note>
+  Flower is optional but highly recommended for debugging task issues and monitoring queue depth.
+</Note>
+
+---
+
+## Testing the Pipeline
+
+### Generate a Test Email
+
+Send a test request to the email generation endpoint:
+
+```bash
+curl -X POST http://localhost:8000/api/email/generate \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email_template": "Hi {{name}}, I love your work on {{research}}!",
+    "recipient_name": "Dr. Yann LeCun",
+    "recipient_interest": "deep learning"
+  }'
+```
+
+**Response:**
+```json
+{
+  "task_id": "abc-123-def-456"
+}
+```
+
+### Poll Task Status
+
+```bash
+curl http://localhost:8000/api/email/status/abc-123-def-456 \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Status Progression:**
+```json
+{"status": "PENDING"}   → Task queued
+{"status": "STARTED", "current_step": "web_scraper"}  → Processing
+{"status": "SUCCESS", "result": {"email_id": "email-uuid"}}  → Complete
+```
+
+### Retrieve Generated Email
+
+```bash
+curl http://localhost:8000/api/email/email-uuid \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+---
+
+## Development Workflows
+
+### Hot Reload
+
+When running with `--reload`, FastAPI automatically restarts when you edit:
+- Route handlers (`api/routes/*.py`)
+- Models (`models/*.py`)
+- Services (`services/*.py`)
+
+<Warning>
+  **Celery worker does NOT auto-reload.** You must manually restart the worker after changing task code:
+  ```bash
+  # Press Ctrl+C in the Celery terminal, then:
+  celery -A celery_config.celery_app worker --loglevel=info --queues=email_default --concurrency=1
+  ```
+</Warning>
+
+---
+
+### Viewing Logs
+
+**FastAPI Logs:**
+- Printed to the terminal where `uvicorn` is running
+- Structured logging via Logfire (if configured)
+
+**Celery Logs:**
+- Printed to the terminal where `celery worker` is running
+- Includes task start, success, failure, and retry events
+
+**Example Celery Log:**
+```
+[2025-01-24 10:30:00,000: INFO/MainProcess] Task tasks.email_tasks.generate_email_task[abc-123] received
+[2025-01-24 10:30:00,100: INFO/ForkPoolWorker-1] Pipeline step: template_parser
+[2025-01-24 10:30:02,500: INFO/ForkPoolWorker-1] Pipeline step: web_scraper
+[2025-01-24 10:30:08,200: INFO/ForkPoolWorker-1] Pipeline step: email_composer
+[2025-01-24 10:30:12,000: INFO/ForkPoolWorker-1] Task tasks.email_tasks.generate_email_task[abc-123] succeeded in 12.0s
+```
+
+---
+
+### Debugging
+
+<Steps>
+  <Step title="Enable debug logging">
+    Set log level to DEBUG in your `.env` file:
+    ```bash
+    LOG_LEVEL=DEBUG
+    ```
+
+    Restart the FastAPI server and Celery worker.
+  </Step>
+
+  <Step title="Use Logfire for tracing">
+    If `LOGFIRE_TOKEN` is configured, view distributed traces at:
+    - [logfire.pydantic.dev](https://logfire.pydantic.dev/)
+
+    Filter by `service_name=scribe-api` or `service_name=scribe-celery-worker`.
+  </Step>
+
+  <Step title="Interactive debugging with pdb">
+    Add breakpoints in your code:
+    ```python
+    import pdb; pdb.set_trace()
+    ```
+
+    Run uvicorn without `--reload` to prevent automatic restarts.
+  </Step>
+</Steps>
+
+---
+
+## Stopping Services
+
+### Stop All Services (Quick)
+
+```bash
+make stop-all
+```
+
+This kills all running `uvicorn`, `celery`, and `flower` processes.
+
+---
+
+### Stop Services Manually
+
+**FastAPI Server:**
+- Press **Ctrl+C** in the uvicorn terminal
+
+**Celery Worker:**
+- Press **Ctrl+C** in the Celery terminal
+- Or send SIGTERM: `pkill -f "celery.*worker"`
+
+**Redis:**
+```bash
+redis-cli shutdown
+# Or: brew services stop redis (macOS)
+# Or: sudo systemctl stop redis (Linux)
+```
+
+**Flower:**
+- Press **Ctrl+C** in the Flower terminal
+
+<Note>
+  Always stop Celery workers gracefully with Ctrl+C to allow them to finish in-progress tasks.
+</Note>
+
+---
+
+## Production Setup
+
+For production deployments, use systemd services or process managers:
+
+### Using systemd (Linux)
+
+Create service files for each component:
+
+**FastAPI Service (`/etc/systemd/system/scribe-api.service`):**
+```ini
+[Unit]
+Description=Scribe FastAPI Server
+After=network.target
+
+[Service]
+Type=simple
+User=scribe
+WorkingDirectory=/home/scribe/pythonserver
+Environment="PATH=/home/scribe/pythonserver/venv/bin"
+ExecStart=/home/scribe/pythonserver/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 180
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Celery Worker Service (`/etc/systemd/system/scribe-celery.service`):**
+```ini
+[Unit]
+Description=Scribe Celery Worker
+After=network.target redis.service
+
+[Service]
+Type=simple
+User=scribe
+WorkingDirectory=/home/scribe/pythonserver
+Environment="PATH=/home/scribe/pythonserver/venv/bin"
+ExecStart=/home/scribe/pythonserver/venv/bin/celery -A celery_config.celery_app worker --loglevel=info --queues=email_default --concurrency=1 --pool=solo
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Enable and start services:**
+```bash
+sudo systemctl enable scribe-api scribe-celery
+sudo systemctl start scribe-api scribe-celery
+```
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Redis connection refused">
+    **Error:** `redis.exceptions.ConnectionError: Error 111 connecting to localhost:6379`
+
+    **Solution:**
+    1. Start Redis: `redis-server --daemonize yes`
+    2. Verify: `redis-cli ping` → Should respond "PONG"
+    3. Check port: Ensure Redis is listening on 6379 (or update `.env`)
+  </Accordion>
+
+  <Accordion title="Celery worker not picking up tasks">
+    **Issue:** Tasks stay in PENDING status
+
+    **Solutions:**
+    1. Verify worker is running: `celery -A celery_config.celery_app inspect active`
+    2. Check queue name matches: `--queues=email_default`
+    3. Restart worker: Ctrl+C and rerun the worker command
+    4. Clear Redis: `redis-cli FLUSHALL` (development only)
+  </Accordion>
+
+  <Accordion title="Port 8000 already in use">
+    **Error:** `OSError: [Errno 48] Address already in use`
+
+    **Solution:**
+    1. Find process: `lsof -i :8000`
+    2. Kill it: `kill -9 <PID>`
+    3. Or use a different port: `uvicorn main:app --port 8001`
+  </Accordion>
+
+  <Accordion title="Out of memory (Celery worker crash)">
+    **Issue:** Worker crashes with "Killed" message
+
+    **Solution:**
+    1. Verify concurrency=1: `--concurrency=1`
+    2. Use solo pool: `--pool=solo`
+    3. Add swap space (Raspberry Pi):
+       ```bash
+       sudo dphys-swapfile swapoff
+       sudo nano /etc/dphys-swapfile  # Set CONF_SWAPSIZE=1024
+       sudo dphys-swapfile setup
+       sudo dphys-swapfile swapon
+       ```
+  </Accordion>
+
+  <Accordion title="Hot reload not working">
+    **Issue:** Code changes not reflected
+
+    **Solution:**
+    - FastAPI: Ensure `--reload` flag is present
+    - Celery: Manual restart required (no auto-reload)
+    - Check file permissions: Virtual environment must be writable
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Next Steps
+
+- **Deploy to production** → [Deployment Guide](/guides/deployment)
+- **Understand the pipeline** → [Pipeline Architecture](/architecture/pipeline)
+- **API reference** → [API Documentation](/api-reference)
+
+---
+
+## Useful Commands Reference
+
+```bash
+# Quick start
+make serve                  # Start FastAPI + Celery
+make redis-start            # Start Redis
+make stop-all               # Stop all services
+
+# Manual control
+uvicorn main:app --reload   # Start API server
+celery -A celery_config.celery_app worker --loglevel=info --queues=email_default --concurrency=1  # Start worker
+celery -A celery_config.celery_app flower  # Start monitoring
+
+# Health checks
+curl http://localhost:8000/health     # API health
+redis-cli ping                        # Redis health
+celery -A celery_config.celery_app inspect active  # Worker health
+
+# Debugging
+curl http://localhost:8000/docs       # Interactive API docs
+open http://localhost:5555            # Flower dashboard
+```

@@ -1,0 +1,366 @@
+---
+title: "Development Setup"
+description: "Set up your local development environment for Scribe Backend"
+---
+
+## Prerequisites
+
+Before starting, ensure you have the following installed:
+
+- **Python 3.13+** (required for modern async features)
+- **PostgreSQL** via Supabase (managed database)
+- **Redis 5.0+** (for Celery task queue)
+- **Git** (for version control)
+
+## Initial Setup
+
+<Steps>
+  <Step title="Clone the Repository">
+    ```bash
+    git clone <repository-url>
+    cd pythonserver
+    ```
+  </Step>
+
+  <Step title="Create Virtual Environment">
+    Python 3.13 is required for async features and performance optimizations.
+
+    ```bash
+    python3.13 -m venv venv
+    source venv/bin/activate  # On Windows: venv\Scripts\activate
+    ```
+
+    <Note>
+      **Always activate the virtual environment** before running any commands. Verify with:
+      ```bash
+      which python  # Should point to venv/bin/python
+      ```
+    </Note>
+  </Step>
+
+  <Step title="Install Dependencies">
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+    This installs:
+    - FastAPI 0.109+ (web framework)
+    - SQLAlchemy 2.0 (ORM)
+    - Celery 5.3+ (task queue)
+    - Playwright 1.56+ (web scraping)
+    - Anthropic Claude SDK
+    - Logfire 4.14+ (observability)
+  </Step>
+
+  <Step title="Install Playwright Browsers">
+    Playwright requires Chromium for headless web scraping (~300MB download).
+
+    ```bash
+    playwright install chromium
+    ```
+  </Step>
+
+  <Step title="Configure Environment Variables">
+    Copy the example environment file and configure your credentials:
+
+    ```bash
+    cp .env.example .env
+    ```
+
+    Edit `.env` with your values:
+
+    ```bash
+    # Database (Supabase Transaction Pooler)
+    DB_USER=postgres.<project-ref>
+    DB_PASSWORD=your-password
+    DB_HOST=aws-1-<region>.pooler.supabase.com
+    DB_PORT=6543
+    DB_NAME=postgres
+
+    # Supabase
+    SUPABASE_URL=https://xxx.supabase.co
+    SUPABASE_SERVICE_ROLE_KEY=eyJhbG...
+
+    # APIs
+    ANTHROPIC_API_KEY=sk-ant-...
+    EXA_API_KEY=your-exa-key
+
+    # Redis (Celery)
+    REDIS_HOST=localhost
+    REDIS_PORT=6379
+    REDIS_DB=0
+
+    # Observability
+    LOGFIRE_TOKEN=your-token
+
+    # Server
+    ENVIRONMENT=development
+    DEBUG=True
+    ALLOWED_ORIGINS=http://localhost:3000
+    ```
+
+    <Accordion title="Where to Get API Keys">
+      - **Anthropic API**: [console.anthropic.com](https://console.anthropic.com/)
+      - **Exa API**: [exa.ai](https://exa.ai/)
+      - **Supabase**: Your project dashboard
+      - **Logfire**: [logfire.pydantic.dev](https://logfire.pydantic.dev/)
+    </Accordion>
+  </Step>
+
+  <Step title="Run Database Migrations">
+    Apply all database migrations to set up tables:
+
+    ```bash
+    alembic upgrade head
+    ```
+
+    Verify migration status:
+    ```bash
+    alembic current
+    ```
+  </Step>
+
+  <Step title="Verify Installation">
+    Test that all imports work correctly:
+
+    ```bash
+    python --version  # Should be 3.13+
+    playwright --version
+    python -c "import anthropic, celery, fastapi; print('✅ All imports successful')"
+    ```
+  </Step>
+</Steps>
+
+## Running Services
+
+### Quick Start (Recommended)
+
+```bash
+# Terminal 1: Start Redis
+make redis-start
+
+# Terminal 2: Start API + Celery Worker
+make serve
+```
+
+**Access Points:**
+- API: http://localhost:8000
+- API Docs: http://localhost:8000/docs
+- Health Check: http://localhost:8000/health
+- Flower Dashboard: http://localhost:5555 (run `make flower`)
+
+### Manual Start (For Debugging)
+
+Run services individually for better control:
+
+```bash
+# Terminal 1: Redis
+make redis-start
+# Or manually: redis-server
+
+# Terminal 2: FastAPI (with hot reload)
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+# Terminal 3: Celery worker
+celery -A celery_config.celery_app worker \
+  --loglevel=info \
+  --queues=email_default \
+  --concurrency=1
+
+# Terminal 4: Flower monitoring (optional)
+celery -A celery_config.celery_app flower
+```
+
+<Note>
+  **Celery runs with `concurrency=1`** for sequential processing. This prevents API rate limits when generating multiple emails.
+</Note>
+
+### Stopping Services
+
+```bash
+make stop-all
+
+# Or manually:
+pkill -f uvicorn
+pkill -f celery
+redis-cli shutdown
+```
+
+## IDE Configuration
+
+### VS Code Setup
+
+Create `.vscode/settings.json`:
+
+```json
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/venv/bin/python",
+  "python.linting.enabled": true,
+  "python.linting.pylintEnabled": false,
+  "python.linting.flake8Enabled": true,
+  "python.formatting.provider": "black",
+  "python.formatting.blackArgs": ["--line-length=100"],
+  "editor.formatOnSave": true,
+  "[python]": {
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": true
+    }
+  },
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": [
+    ".",
+    "-v"
+  ]
+}
+```
+
+### PyCharm Setup
+
+1. **Configure Interpreter**: Settings → Project → Python Interpreter → Add Interpreter → Existing Environment → `venv/bin/python`
+2. **Enable pytest**: Settings → Tools → Python Integrated Tools → Testing → Default test runner: pytest
+3. **Code Style**: Settings → Editor → Code Style → Python → Set line length to 100
+
+## Pre-commit Hooks
+
+While not strictly enforced, you can set up pre-commit hooks for code quality:
+
+```bash
+# Install pre-commit
+pip install pre-commit
+
+# Install git hooks
+pre-commit install
+```
+
+Create `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/psf/black
+    rev: 23.3.0
+    hooks:
+      - id: black
+        args: [--line-length=100]
+
+  - repo: https://github.com/pycqa/flake8
+    rev: 6.0.0
+    hooks:
+      - id: flake8
+        args: [--max-line-length=100, --ignore=E203,W503]
+
+  - repo: https://github.com/pycqa/isort
+    rev: 5.12.0
+    hooks:
+      - id: isort
+        args: [--profile=black]
+```
+
+## Environment Variables Reference
+
+<Accordion title="Complete Environment Variables">
+  | Variable | Required | Default | Description |
+  |----------|----------|---------|-------------|
+  | `ENVIRONMENT` | No | `development` | Runtime environment |
+  | `DEBUG` | No | `False` | Enable debug mode |
+  | `DB_USER` | Yes | - | Supabase database user |
+  | `DB_PASSWORD` | Yes | - | Database password |
+  | `DB_HOST` | Yes | - | Database host (pooler URL) |
+  | `DB_PORT` | No | `6543` | Transaction pooler port |
+  | `DB_NAME` | Yes | - | Database name |
+  | `SUPABASE_URL` | Yes | - | Supabase project URL |
+  | `SUPABASE_SERVICE_ROLE_KEY` | Yes | - | Service role key |
+  | `ANTHROPIC_API_KEY` | Yes | - | Claude API key |
+  | `EXA_API_KEY` | Yes | - | Exa search API key |
+  | `FIREWORKS_API_KEY` | No | - | Fireworks AI key (optional) |
+  | `REDIS_HOST` | No | `localhost` | Redis host |
+  | `REDIS_PORT` | No | `6379` | Redis port |
+  | `REDIS_DB` | No | `0` | Redis database number |
+  | `LOGFIRE_TOKEN` | No | - | Logfire observability token |
+  | `TEMPLATE_PARSER_MODEL` | No | `fireworks:kimi-k2p5` | Model for template parsing |
+  | `EMAIL_COMPOSER_MODEL` | No | `fireworks:kimi-k2p5` | Model for email generation |
+  | `ALLOWED_ORIGINS` | No | `http://localhost:3000` | CORS origins (comma-separated) |
+</Accordion>
+
+## Hot-Swappable LLM Models
+
+Scribe supports switching between different LLM providers without code changes:
+
+```bash
+# Use Anthropic Claude
+TEMPLATE_PARSER_MODEL=anthropic:claude-haiku-4-5
+EMAIL_COMPOSER_MODEL=anthropic:claude-sonnet-4-5
+
+# Use Fireworks AI (faster, cheaper)
+TEMPLATE_PARSER_MODEL=fireworks:accounts/fireworks/models/kimi-k2p5
+EMAIL_COMPOSER_MODEL=fireworks:accounts/fireworks/models/kimi-k2p5
+```
+
+<Note>
+  **Cost Optimization**: Use lightweight models (Haiku, Kimi) for template parsing and powerful models (Sonnet) for final email composition.
+</Note>
+
+## Common Issues
+
+<Accordion title="Redis Connection Error">
+  ```
+  redis.exceptions.ConnectionError: Error connecting to Redis
+  ```
+
+  **Solution**: Start Redis server
+  ```bash
+  redis-cli ping  # Should respond "PONG"
+  make redis-start
+  ```
+</Accordion>
+
+<Accordion title="Playwright Browser Not Found">
+  ```
+  playwright._impl._api_types.Error: Executable doesn't exist
+  ```
+
+  **Solution**: Install Chromium
+  ```bash
+  playwright install chromium
+  ```
+</Accordion>
+
+<Accordion title="Module Import Errors">
+  ```
+  ModuleNotFoundError: No module named 'pipeline'
+  ```
+
+  **Solution**: Ensure you're in the project root and venv is activated
+  ```bash
+  cd /path/to/pythonserver
+  source venv/bin/activate
+  which python  # Should be venv/bin/python
+  ```
+</Accordion>
+
+<Accordion title="Database Connection Timeout">
+  ```
+  sqlalchemy.exc.OperationalError: timeout expired
+  ```
+
+  **Solution**: Check Supabase status and connection string
+  - Verify `DB_HOST` uses `.pooler.supabase.com`
+  - Ensure `DB_PORT=6543` for transaction pooler
+  - Check firewall/network settings
+</Accordion>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Testing Guide" icon="flask" href="/development/testing">
+    Learn how to write and run tests
+  </Card>
+  <Card title="Debugging" icon="bug" href="/development/debugging">
+    Debug pipeline steps and Celery tasks
+  </Card>
+  <Card title="Project Structure" icon="folder-tree" href="/development/project-structure">
+    Understand the codebase organization
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/overview">
+    Explore the REST API endpoints
+  </Card>
+</CardGroup>

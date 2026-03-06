@@ -1,0 +1,499 @@
+---
+title: Database Setup
+description: Configure PostgreSQL/Supabase connection, run Alembic migrations, and set up connection pooling
+---
+
+## Overview
+
+Scribe Backend uses **PostgreSQL** as its primary database, typically hosted on **Supabase**. The application connects via Supabase's **transaction pooler** (port 6543) for optimal performance and connection management.
+
+<Note>
+  Scribe uses **SQLAlchemy 2.0** with **Alembic** for database migrations. All schema changes are version-controlled and reproducible.
+</Note>
+
+---
+
+## Database Architecture
+
+### Connection Strategy
+
+```
+Scribe Backend → Supavisor (Transaction Pooler) → PostgreSQL
+     ↓               ↓ Port 6543                      ↓
+  NullPool    Server-side pooling              Database
+```
+
+**Key Design Decisions:**
+
+1. **Transaction Pooler (Port 6543):** Supabase's Supavisor handles connection pooling server-side
+2. **NullPool:** No client-side pooling — fresh connections per request, immediately closed
+3. **SSL Required:** All connections enforce `sslmode=require`
+
+<Warning>
+  Do not use QueuePool or connection pooling on the client side with transaction pooler. This causes stale connection issues.
+</Warning>
+
+---
+
+## Step 1: Set Up Supabase Project
+
+<Steps>
+  <Step title="Create Supabase project">
+    1. Go to [supabase.com](https://supabase.com)
+    2. Click **New Project**
+    3. Choose a region close to your users
+    4. Set a strong database password
+  </Step>
+
+  <Step title="Get connection details">
+    Navigate to **Settings → Database** in your Supabase dashboard.
+
+    Copy the **Transaction Pooler** connection string:
+    ```
+    Host: aws-0-us-west-1.pooler.supabase.com
+    Port: 6543
+    Database: postgres
+    User: postgres.<project-ref>
+    ```
+  </Step>
+
+  <Step title="Configure environment variables">
+    Add these to your `.env` file:
+
+    ```bash
+    DB_USER=postgres.<project-ref>
+    DB_PASSWORD=your-database-password
+    DB_HOST=aws-0-us-west-1.pooler.supabase.com
+    DB_PORT=6543
+    DB_NAME=postgres
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Step 2: Verify Database Connection
+
+Test the connection before running migrations:
+
+```bash
+# Activate virtual environment
+source venv/bin/activate
+
+# Test connection using Python
+python -c "from database import check_db_connection; print('Connected!' if check_db_connection() else 'Failed')"
+```
+
+### Alternative: Test with psql
+
+```bash
+psql "postgresql://postgres.<project-ref>:PASSWORD@aws-0-us-west-1.pooler.supabase.com:6543/postgres?sslmode=require"
+```
+
+<Note>
+  If connection fails, verify your IP is allowed in Supabase's database settings or disable IP restrictions for development.
+</Note>
+
+---
+
+## Step 3: Run Database Migrations
+
+Alembic manages database schema changes through versioned migration files.
+
+### Apply Migrations
+
+```bash
+# Run all pending migrations
+alembic upgrade head
+```
+
+**Expected output:**
+```
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> abc123, create users table
+INFO  [alembic.runtime.migration] Running upgrade abc123 -> def456, create emails table
+INFO  [alembic.runtime.migration] Running upgrade def456 -> ghi789, create queue_items table
+```
+
+### Check Current Migration Version
+
+```bash
+alembic current
+```
+
+**Output:**
+```
+ghi789 (head)
+```
+
+### View Migration History
+
+```bash
+alembic history --verbose
+```
+
+---
+
+## Database Schema
+
+### Users Table
+
+```sql
+CREATE TABLE users (
+    id UUID PRIMARY KEY,                 -- From Supabase auth.users
+    email VARCHAR(255) UNIQUE NOT NULL,
+    display_name VARCHAR(255),
+    generation_count INTEGER DEFAULT 0,
+    template_count INTEGER DEFAULT 0,
+    onboarded BOOLEAN DEFAULT FALSE,
+    email_template TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX ix_users_email ON users(email);
+```
+
+**Purpose:** Stores user profiles synced with Supabase Auth.
+
+---
+
+### Emails Table
+
+```sql
+CREATE TABLE emails (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    recipient_name VARCHAR(255) NOT NULL,
+    recipient_interest VARCHAR(500) NOT NULL,
+    email_message TEXT NOT NULL,
+    template_type VARCHAR(50),           -- RESEARCH | BOOK | GENERAL
+    metadata JSONB,                      -- Pipeline metadata
+    is_confident BOOLEAN DEFAULT TRUE,
+    displayed BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX ix_emails_user_id ON emails(user_id);
+CREATE INDEX ix_emails_created_at ON emails(created_at);
+CREATE INDEX ix_emails_user_created ON emails(user_id, created_at DESC);
+```
+
+**JSONB Metadata Structure:**
+```json
+{
+  "search_terms": ["Dr. Jane Smith machine learning"],
+  "scraped_urls": ["https://example.com/profile"],
+  "arxiv_papers": [
+    {
+      "title": "Deep Learning for Computer Vision",
+      "arxiv_url": "https://arxiv.org/abs/...",
+      "year": 2023
+    }
+  ],
+  "step_timings": {
+    "template_parser": 1.2,
+    "web_scraper": 5.3,
+    "arxiv_helper": 0.8,
+    "email_composer": 3.1
+  },
+  "model": "anthropic:claude-sonnet-4-5",
+  "temperature": 0.7
+}
+```
+
+---
+
+### Queue Items Table
+
+```sql
+CREATE TABLE queue_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    recipient_name VARCHAR(255) NOT NULL,
+    recipient_interest VARCHAR(500) NOT NULL,
+    email_template_text TEXT NOT NULL,
+    status VARCHAR(50) NOT NULL,         -- PENDING | PROCESSING | COMPLETED | FAILED
+    celery_task_id VARCHAR(255),
+    current_step VARCHAR(100),
+    email_id UUID REFERENCES emails(id) ON DELETE SET NULL,
+    error_message TEXT,
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX ix_queue_items_user_id ON queue_items(user_id);
+CREATE INDEX ix_queue_items_status ON queue_items(status);
+CREATE INDEX ix_queue_items_created_at ON queue_items(created_at);
+CREATE INDEX ix_queue_items_user_status ON queue_items(user_id, status);
+```
+
+**Purpose:** Tracks batch email generation requests with FIFO processing.
+
+---
+
+## Connection Pooling Explained
+
+### Why NullPool?
+
+Scribe uses SQLAlchemy's **NullPool** strategy:
+
+```python
+from sqlalchemy import create_engine
+from sqlalchemy.pool import NullPool
+
+engine = create_engine(
+    settings.database_url,
+    poolclass=NullPool,  # No client-side pooling
+    connect_args={
+        "connect_timeout": settings.db_connect_timeout,
+        "options": f"-c statement_timeout={settings.db_statement_timeout}"
+    }
+)
+```
+
+**Benefits:**
+1. **No Stale Connections:** Fresh connection per request, immediately discarded
+2. **Optimal for Transaction Pooler:** Supavisor handles pooling server-side
+3. **Memory Efficient:** No idle connections consuming resources
+4. **Works on Raspberry Pi:** Minimal memory footprint
+
+<Note>
+  Transaction pooler (port 6543) is designed for stateless, short-lived connections. NullPool is the perfect match.
+</Note>
+
+---
+
+## Connection Timeouts
+
+Scribe configures two types of timeouts:
+
+### Connect Timeout (30 seconds)
+
+```bash
+DB_CONNECT_TIMEOUT=30  # Handles cold starts and network latency
+```
+
+### Statement Timeout (30 seconds)
+
+```bash
+DB_STATEMENT_TIMEOUT=30000  # Query timeout in milliseconds
+```
+
+<Warning>
+  Long-running queries beyond 30 seconds will be terminated. Optimize slow queries or increase the timeout.
+</Warning>
+
+---
+
+## Creating Migrations
+
+When you modify database models, create a new migration:
+
+```bash
+# Auto-generate migration from model changes
+alembic revision --autogenerate -m "Add new column to users table"
+```
+
+Alembic compares your models (`models/*.py`) with the current database schema and generates a migration file in `alembic/versions/`.
+
+### Review Generated Migration
+
+```bash
+# Open the latest migration file
+ls -lt alembic/versions/ | head -2
+cat alembic/versions/abc123_add_new_column_to_users_table.py
+```
+
+**Example migration:**
+```python
+def upgrade() -> None:
+    op.add_column('users', sa.Column('new_field', sa.String(255), nullable=True))
+
+def downgrade() -> None:
+    op.drop_column('users', 'new_field')
+```
+
+### Apply Migration
+
+```bash
+alembic upgrade head
+```
+
+### Rollback Migration
+
+```bash
+# Rollback one migration
+alembic downgrade -1
+
+# Rollback to specific version
+alembic downgrade abc123
+```
+
+---
+
+## Database Utilities
+
+### Health Check
+
+The `/health` endpoint checks database connectivity:
+
+```bash
+curl http://localhost:8000/health
+```
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "service": "scribe-api",
+  "version": "1.0.0",
+  "database": "connected",
+  "environment": "development"
+}
+```
+
+### Get Database Info
+
+```python
+from database import get_db_info
+
+db_info = get_db_info()
+print(db_info)
+# Output: {"status": "connected", "url": "postgresql+psycopg2://...@...pooler.supabase.com:6543/postgres"}
+```
+
+---
+
+## Production Considerations
+
+### SSL/TLS Enforcement
+
+All Supabase connections require SSL:
+
+```python
+database_url = f"postgresql+psycopg2://...?sslmode=require"
+```
+
+<Warning>
+  Never set `sslmode=disable` in production. This exposes sensitive data over unencrypted connections.
+</Warning>
+
+### Connection Pooler Choice
+
+| Pooler Type | Port | Use Case |
+|-------------|------|----------|
+| **Transaction** | 6543 | Stateless apps, serverless, auto-scaling (Scribe) |
+| **Session** | 5432 | Long-running transactions, advisory locks |
+
+<Note>
+  Scribe uses transaction pooler (6543) for optimal performance with its stateless pipeline design.
+</Note>
+
+---
+
+## Common Database Operations
+
+### Backup Database
+
+Supabase provides automatic backups, but you can also manually export:
+
+```bash
+pg_dump "postgresql://postgres.<project-ref>:PASSWORD@aws-0-us-west-1.pooler.supabase.com:6543/postgres?sslmode=require" > backup.sql
+```
+
+### Restore Database
+
+```bash
+psql "postgresql://..." < backup.sql
+```
+
+### Reset Database (Development Only)
+
+<Warning>
+  **Destructive operation:** This deletes all data.
+</Warning>
+
+```bash
+# Rollback all migrations
+alembic downgrade base
+
+# Reapply migrations
+alembic upgrade head
+```
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Connection timeout errors">
+    **Error:** `OperationalError: could not connect to server`
+
+    **Solutions:**
+    1. Check database host and port in `.env`
+    2. Verify IP whitelist in Supabase dashboard
+    3. Increase `DB_CONNECT_TIMEOUT` for slow networks:
+       ```bash
+       DB_CONNECT_TIMEOUT=60
+       ```
+  </Accordion>
+
+  <Accordion title="SSL/TLS errors">
+    **Error:** `SSL connection has been closed unexpectedly`
+
+    **Solution:** Ensure `sslmode=require` is in the connection string. Scribe handles this automatically via `settings.database_url`.
+  </Accordion>
+
+  <Accordion title="Migration conflicts">
+    **Error:** `Target database is not up to date`
+
+    **Solution:**
+    ```bash
+    # Check current version
+    alembic current
+
+    # View pending migrations
+    alembic history
+
+    # Apply missing migrations
+    alembic upgrade head
+    ```
+  </Accordion>
+
+  <Accordion title="Port 6543 vs 5432 confusion">
+    **Issue:** Using wrong port for connection type
+
+    **Solution:**
+    - **Transaction pooler:** Use port 6543 (recommended)
+    - **Session pooler:** Use port 5432
+    - **Direct connection:** Use port 5432 (not recommended)
+
+    Scribe defaults to transaction pooler (6543).
+  </Accordion>
+
+  <Accordion title="Stale connection errors">
+    **Error:** `server closed the connection unexpectedly`
+
+    **Cause:** Using QueuePool with transaction pooler
+
+    **Solution:** Verify `poolclass=NullPool` in `database/base.py`. This is the default configuration.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Next Steps
+
+- **Run the application locally** → [Running Locally Guide](/guides/running-locally)
+- **Deploy to production** → [Deployment Guide](/guides/deployment)
+
+---
+
+## Additional Resources
+
+- [Alembic Documentation](https://alembic.sqlalchemy.org/)
+- [SQLAlchemy 2.0 Documentation](https://docs.sqlalchemy.org/en/20/)
+- [Supabase Connection Pooling](https://supabase.com/docs/guides/database/connecting-to-postgres#connection-pooler)
+- [PostgreSQL SSL Modes](https://www.postgresql.org/docs/current/libpq-ssl.html)

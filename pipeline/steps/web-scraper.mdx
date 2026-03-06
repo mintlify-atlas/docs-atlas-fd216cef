@@ -1,0 +1,380 @@
+---
+title: "Web Scraper"
+description: "Step 2: Fetch professor information via dual Exa queries with AI-powered summarization"
+---
+
+## Overview
+
+The Web Scraper is the second step in the email generation pipeline. It uses Exa Search API to find information about the recipient through a dual-query strategy: one for background/biography, one for publications/achievements.
+
+**Purpose:**
+- Fetch comprehensive information about the recipient
+- Summarize background and professional details
+- Gather publication and achievement data
+- Provide cited sources for the Email Composer
+
+**Timing:** ~5.3 seconds (varies by content length)  
+**Search API:** Exa Search (AI-native search with citations)  
+**Summarization:** Claude Haiku 4.5 (via Exa's built-in AI features)
+
+---
+
+## Input Schema
+
+The Web Scraper requires these fields from Step 1 (Template Parser):
+
+<ParamField path="search_terms" type="string[]" required>
+  Search terms extracted by Template Parser
+  
+  **Constraints:**
+  - Must not be empty (Step 1 must complete first)
+  - Used to build targeted queries
+</ParamField>
+
+<ParamField path="template_type" type="enum" required>
+  Template classification from Step 1
+  
+  **Values:**
+  - `RESEARCH` - Focus on academic publications
+  - `BOOK` - Focus on authored books
+  - `GENERAL` - Broad professional information
+</ParamField>
+
+<ParamField path="recipient_name" type="string" required>
+  Name of the email recipient
+  
+  **Usage:** Included in both background and publications queries
+</ParamField>
+
+<ParamField path="recipient_interest" type="string" required>
+  Recipient's research area or topic
+  
+  **Usage:** Helps narrow search results to relevant content
+</ParamField>
+
+---
+
+## Output Schema
+
+The Web Scraper updates `PipelineData` with:
+
+<ResponseField name="scraped_content" type="string">
+  Combined summary of background and publications information
+  
+  **Format:**
+  ```
+  [Background summary]
+  
+  [Publications summary]
+  
+  **SOURCES:**
+  - Source Title 1: https://url1.com
+  - Source Title 2: https://url2.com
+  ```
+  
+  **Max Length:** 3,000 characters (enforced for Email Composer context window)
+</ResponseField>
+
+<ResponseField name="scraped_urls" type="string[]">
+  URLs of all sources cited in the summary
+  
+  **Example:**
+  ```json
+  [
+    "https://university.edu/faculty/jane-smith",
+    "https://scholar.google.com/citations?user=abc123",
+    "https://research-lab.org/team/smith"
+  ]
+  ```
+</ResponseField>
+
+<ResponseField name="scraped_page_contents" type="object">
+  Mapping of URLs to their full text content (for debugging)
+  
+  **Structure:**
+  ```json
+  {
+    "https://url1.com": "Full text content...",
+    "https://url2.com": "Full text content..."
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="scraping_metadata" type="object">
+  Metadata about the scraping operation:
+  
+  - `source` - Always `"exa_dual"` (dual-query strategy)
+  - `success` - Boolean indicating if information was found
+  - `citation_count` - Number of sources cited
+  - `background_length` - Character count of background answer
+  - `publications_length` - Character count of publications answer
+  - `combined_length` - Character count of combined summary
+</ResponseField>
+
+---
+
+## Implementation Details
+
+### Dual-Query Strategy
+
+The scraper executes two parallel Exa queries for comprehensive coverage:
+
+```python
+def _build_queries(self, pipeline_data: PipelineData) -> tuple[str, str]:
+    """Build background and publications queries."""
+    background = build_background_query(
+        recipient_name=pipeline_data.recipient_name,
+        recipient_interest=pipeline_data.recipient_interest
+    )
+    publications = build_publications_query(
+        recipient_name=pipeline_data.recipient_name,
+        recipient_interest=pipeline_data.recipient_interest,
+        template_type=pipeline_data.template_type
+    )
+    return background, publications
+```
+
+**Source:** `pipeline/steps/web_scraper/main.py:30-41`
+
+#### Query 1: Background
+
+Focuses on:
+- Current position and affiliation
+- Educational background
+- Research interests and expertise
+- Lab or group affiliations
+
+**Example Query:**
+```
+Dr. Jane Smith machine learning healthcare - current position, 
+research interests, university affiliation
+```
+
+#### Query 2: Publications
+
+Focuses on (varies by `template_type`):
+- **RESEARCH**: Recent papers, top publications, Google Scholar profile
+- **BOOK**: Authored books, published works, writing credits
+- **GENERAL**: Professional achievements, notable projects
+
+**Example Query (RESEARCH):**
+```
+Dr. Jane Smith machine learning healthcare - recent publications, 
+research papers, Google Scholar
+```
+
+**Source:** `pipeline/steps/web_scraper/prompts.py`
+
+### Exa Search Integration
+
+The step uses Exa's native AI-powered search and summarization:
+
+```python
+result = await self.exa_client.dual_answer(
+    background_query=background_query,
+    publications_query=publications_query,
+    timeout=45.0
+)
+```
+
+**Exa Features Used:**
+- **AI Search** - Semantic search beyond keyword matching
+- **Auto-summarization** - Built-in AI answers from search results
+- **Citations** - Automatic source attribution
+- **Content Extraction** - Full page text for each result
+
+**Source:** `pipeline/steps/web_scraper/main.py:64-68`
+
+### Result Formatting
+
+The dual query results are combined with source attribution:
+
+```python
+def _format_result(self, result: DualQueryResult) -> str:
+    """Format combined answer with sources."""
+    formatted = result.combined_answer
+    
+    if result.all_citations:
+        sources = [f"- {c.title or 'Source'}: {c.url}" for c in result.all_citations]
+        formatted += "\n\n**SOURCES:**\n" + "\n".join(sources)
+    
+    return formatted
+```
+
+**Source:** `pipeline/steps/web_scraper/main.py:43-51`
+
+---
+
+## Execution Flow
+
+1. **Validate Input** - Check that Step 1 completed successfully
+2. **Build Queries** - Create background and publications queries
+3. **Execute Dual Search** - Send both queries to Exa API (parallel)
+4. **Check Results** - Handle empty results gracefully
+5. **Format Output** - Combine summaries with source citations
+6. **Update Pipeline Data** - Store content, URLs, and metadata
+7. **Return Success** - With citation count and content length
+
+```python
+async def _execute_step(self, pipeline_data: PipelineData) -> StepResult:
+    background_query, publications_query = self._build_queries(pipeline_data)
+    
+    logfire.info(
+        "Executing dual queries",
+        recipient=pipeline_data.recipient_name,
+        template_type=pipeline_data.template_type.value
+    )
+    
+    result = await self.exa_client.dual_answer(
+        background_query=background_query,
+        publications_query=publications_query,
+        timeout=45.0
+    )
+    
+    # Handle empty results
+    if not result.combined_answer or result.combined_answer == "No information found.":
+        pipeline_data.scraped_content = "No information found for this professor."
+        return StepResult(success=True, warnings=["No information found in Exa search"])
+    
+    # Format and store results
+    formatted = self._format_result(result)
+    pipeline_data.scraped_content = formatted[:3000]  # Enforce max length
+    pipeline_data.scraped_urls = [c.url for c in result.all_citations]
+    
+    return StepResult(success=True, step_name=self.step_name)
+```
+
+**Source:** `pipeline/steps/web_scraper/main.py:53-122`
+
+---
+
+## Error Handling
+
+### Non-Fatal Errors (Pipeline Continues)
+
+<Info>
+  These errors are logged but don't stop the pipeline:
+  
+  - **No Results Found** - Sets `scraped_content` to fallback message
+  - **Empty Answer** - Pipeline continues with minimal information
+</Info>
+
+When no information is found:
+```python
+pipeline_data.scraped_content = "No information found for this professor."
+pipeline_data.scraped_urls = []
+pipeline_data.scraping_metadata = {
+    "source": "exa_dual",
+    "success": False,
+    "citation_count": 0
+}
+```
+
+**Source:** `pipeline/steps/web_scraper/main.py:72-80`
+
+### Fatal Errors (Pipeline Stops)
+
+<Warning>
+  These errors will halt the pipeline:
+  
+  - **Timeout Error** - Exa API doesn't respond within 45 seconds
+  - **Connection Error** - Unable to connect to Exa API
+  - **API Error** - Exa returns error response
+  
+  All errors are wrapped in `ExternalAPIError` with detailed messages.
+</Warning>
+
+```python
+except TimeoutError as e:
+    logfire.error("Exa timeout", error=str(e))
+    raise ExternalAPIError(f"Exa search timed out: {e}")
+except ConnectionError as e:
+    logfire.error("Exa connection error", error=str(e))
+    raise ExternalAPIError(f"Failed to connect to Exa API: {e}")
+except Exception as e:
+    logfire.error("Exa failed", error_type=type(e).__name__)
+    raise ExternalAPIError(f"Exa search failed: {e}")
+```
+
+**Source:** `pipeline/steps/web_scraper/main.py:124-132`
+
+---
+
+## Logging & Observability
+
+The step emits detailed logs to Logfire:
+
+```python
+logfire.info(
+    "Dual search complete",
+    bg_len=len(result.background.answer),
+    pub_len=len(result.publications.answer),
+    citations=len(result.all_citations),
+    background_summary=result.background.answer,
+    publications_summary=result.publications.answer,
+    combined_summary=result.combined_answer
+)
+```
+
+**Source:** `pipeline/steps/web_scraper/main.py:104-112`
+
+### Tracked Metrics
+
+- Background answer length
+- Publications answer length
+- Combined answer length
+- Citation count
+- URLs found
+- Execution duration
+- Success/failure status
+
+---
+
+## Configuration
+
+The step is configured via environment variables:
+
+```bash
+# Exa API credentials
+EXA_API_KEY=your_api_key_here
+
+# Timeout for Exa API calls (seconds)
+EXA_TIMEOUT=45.0
+```
+
+**Source:** `config/settings.py`
+
+---
+
+## Performance Characteristics
+
+**Average Execution Time:** 5.3 seconds
+
+**Breakdown:**
+- Exa API dual query: ~3.5s
+- Result processing: ~0.3s
+- Network latency: ~1.5s
+
+**Variance Factors:**
+- Number of sources found (more citations = longer processing)
+- Content length (longer pages = more extraction time)
+- Network conditions
+
+---
+
+## Next Steps
+
+After the Web Scraper completes:
+
+1. **ArXiv Helper** uses `template_type` to decide if academic papers are needed
+2. **Email Composer** uses `scraped_content` to personalize the email
+3. Final email cites sources from `scraped_urls`
+
+<CardGroup cols={2}>
+  <Card title="Previous: Template Parser" icon="magnifying-glass" href="/pipeline/steps/template-parser">
+    How search terms and template type are determined
+  </Card>
+  <Card title="Next: ArXiv Helper" icon="book" href="/pipeline/steps/arxiv-helper">
+    Conditional academic paper fetching for RESEARCH templates
+  </Card>
+</CardGroup>

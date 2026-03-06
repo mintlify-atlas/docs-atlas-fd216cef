@@ -1,0 +1,387 @@
+---
+title: "Error Handling"
+description: "Understanding API error responses and troubleshooting"
+---
+
+# Error Handling
+
+Scribe Backend uses standard HTTP status codes and provides detailed error messages to help you troubleshoot issues.
+
+## Error Response Format
+
+All errors follow a consistent JSON structure:
+
+### Simple Error
+
+```json
+{
+  "detail": "Email not found or you don't have permission to access it"
+}
+```
+
+### Validation Error (422)
+
+Pydantic validation errors include field-level details:
+
+```json
+{
+  "detail": [
+    {
+      "loc": ["body", "email_template"],
+      "msg": "ensure this value has at least 10 characters",
+      "type": "value_error.any_str.min_length"
+    },
+    {
+      "loc": ["body", "recipient_name"],
+      "msg": "field required",
+      "type": "value_error.missing"
+    }
+  ]
+}
+```
+
+### Task Failure Error
+
+Celery task failures include execution context:
+
+```json
+{
+  "task_id": "abc-123-def-456",
+  "status": "FAILURE",
+  "error": {
+    "message": "Web scraping failed: timeout",
+    "type": "ExternalAPIError",
+    "failed_step": "web_scraper"
+  }
+}
+```
+
+## HTTP Status Codes
+
+### 2xx Success
+
+| Code | Name | Description |
+|------|------|-------------|
+| **200** | OK | Request succeeded |
+| **201** | Created | Resource created successfully |
+| **202** | Accepted | Async task accepted for processing |
+
+### 4xx Client Errors
+
+| Code | Name | Description | Common Causes |
+|------|------|-------------|---------------|
+| **400** | Bad Request | Invalid request parameters | Invalid UUID format, out-of-range values |
+| **401** | Unauthorized | Missing or invalid authentication | Missing Bearer token, expired JWT, invalid token |
+| **403** | Forbidden | Authenticated but insufficient permissions | User not initialized, accessing another user's resource |
+| **404** | Not Found | Resource not found | Invalid email_id, deleted queue item |
+| **422** | Unprocessable Entity | Validation error | Missing required fields, invalid data types |
+| **429** | Too Many Requests | Rate limit exceeded | Submitting > 100 queue items |
+
+### 5xx Server Errors
+
+| Code | Name | Description | Action |
+|------|------|-------------|--------|
+| **500** | Internal Server Error | Unexpected server error | Contact support with task_id |
+| **503** | Service Unavailable | Service temporarily unavailable | Retry after delay, check /health endpoint |
+
+## Common Error Scenarios
+
+### 401 Unauthorized
+
+<Accordion title="Missing Authorization Header">
+**Error:**
+```json
+{
+  "detail": "Missing or invalid authorization header"
+}
+```
+
+**Solution:**
+```bash
+curl -X GET https://scribeapi.manitmishra.com/api/user/profile \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+</Accordion>
+
+<Accordion title="Invalid or Expired Token">
+**Error:**
+```json
+{
+  "detail": "Invalid or expired token"
+}
+```
+
+**Solution:**
+1. Refresh your token using Supabase `refreshSession()`
+2. If refresh fails, re-authenticate with Supabase
+3. Obtain a new JWT token
+</Accordion>
+
+### 403 Forbidden
+
+<Accordion title="User Not Initialized">
+**Error:**
+```json
+{
+  "detail": "User not initialized. Call POST /api/user/init first."
+}
+```
+
+**Solution:**
+```bash
+curl -X POST https://scribeapi.manitmishra.com/api/user/init \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"display_name": "Your Name"}'
+```
+</Accordion>
+
+### 404 Not Found
+
+<Accordion title="Email Not Found">
+**Error:**
+```json
+{
+  "detail": "Email not found or you don't have permission to access it"
+}
+```
+
+**Possible Causes:**
+- Invalid UUID format
+- Email belongs to another user
+- Email was deleted
+</Accordion>
+
+### 422 Validation Error
+
+<Accordion title="Missing Required Fields">
+**Error:**
+```json
+{
+  "detail": [
+    {
+      "loc": ["body", "recipient_name"],
+      "msg": "field required",
+      "type": "value_error.missing"
+    }
+  ]
+}
+```
+
+**Solution:**
+Ensure all required fields are included:
+```json
+{
+  "email_template": "Hi {{name}}!",
+  "recipient_name": "Dr. Jane Smith",
+  "recipient_interest": "machine learning"
+}
+```
+</Accordion>
+
+<Accordion title="Field Length Constraints">
+**Error:**
+```json
+{
+  "detail": [
+    {
+      "loc": ["body", "email_template"],
+      "msg": "ensure this value has at least 10 characters",
+      "type": "value_error.any_str.min_length"
+    }
+  ]
+}
+```
+
+**Constraints:**
+- `email_template`: 10-5000 characters
+- `recipient_name`: 2-255 characters
+- `recipient_interest`: 2-500 characters
+</Accordion>
+
+### 429 Rate Limit
+
+<Accordion title="Batch Size Exceeded">
+**Error:**
+```json
+{
+  "detail": "Maximum 100 items per batch"
+}
+```
+
+**Solution:**
+Split your batch into multiple requests with ≤100 items each.
+</Accordion>
+
+### 500 Internal Server Error
+
+<Accordion title="Unexpected Server Error">
+**Error:**
+```json
+{
+  "detail": "Internal server error"
+}
+```
+
+**Action:**
+1. Check the `/health` endpoint to verify service status
+2. Retry the request after a short delay
+3. If the issue persists, contact support with the `task_id` or request details
+</Accordion>
+
+### 503 Service Unavailable
+
+<Accordion title="Database Connection Failed">
+**Error:**
+```json
+{
+  "detail": "Authentication service unavailable"
+}
+```
+
+**Action:**
+1. Check `/health` endpoint for database status
+2. Wait 30 seconds and retry
+3. If persistent, the service may be under maintenance
+</Accordion>
+
+## Task Execution Errors
+
+When using async endpoints like `POST /api/email/generate`, task failures are reported via the status endpoint:
+
+### Pipeline Step Failures
+
+```json
+{
+  "task_id": "abc-123",
+  "status": "FAILURE",
+  "error": {
+    "message": "ArXiv API timeout",
+    "type": "ExternalAPIError",
+    "failed_step": "arxiv_helper"
+  }
+}
+```
+
+**Common Step Failures:**
+
+| Step | Error Type | Common Cause |
+|------|------------|-------------|
+| `template_parser` | `ValidationError` | Invalid template format |
+| `web_scraper` | `ExternalAPIError` | Google API quota, network timeout |
+| `arxiv_helper` | `ExternalAPIError` | ArXiv API unavailable |
+| `email_composer` | `ValidationError` | LLM output parsing failed |
+
+### Retrying Failed Tasks
+
+Tasks with transient errors (API timeouts, rate limits) are automatically retried:
+
+- **Max retries**: 3
+- **Retry delay**: 30 seconds
+- **Backoff**: Exponential (30s, 60s, 120s)
+
+<Note>
+After 3 failed retries, the task enters `FAILURE` state permanently. You must submit a new request to retry.
+</Note>
+
+## Error Recovery Strategies
+
+### Automatic Retry with Exponential Backoff
+
+```javascript
+async function callAPIWithRetry(url, options, maxRetries = 3) {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const response = await fetch(url, options)
+
+      if (response.status === 429) {
+        // Rate limited - wait and retry
+        const delay = Math.pow(2, i) * 1000
+        await new Promise(resolve => setTimeout(resolve, delay))
+        continue
+      }
+
+      if (response.status >= 500) {
+        // Server error - retry
+        const delay = Math.pow(2, i) * 1000
+        await new Promise(resolve => setTimeout(resolve, delay))
+        continue
+      }
+
+      // Success or client error (don't retry)
+      return response
+    } catch (error) {
+      // Network error - retry
+      if (i === maxRetries - 1) throw error
+      const delay = Math.pow(2, i) * 1000
+      await new Promise(resolve => setTimeout(resolve, delay))
+    }
+  }
+}
+```
+
+### Handling Validation Errors
+
+```javascript
+const response = await fetch('/api/email/generate', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${token}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify(requestData)
+})
+
+if (response.status === 422) {
+  const errors = await response.json()
+  
+  // Display field-level errors to user
+  errors.detail.forEach(error => {
+    const field = error.loc[error.loc.length - 1]
+    console.error(`${field}: ${error.msg}`)
+  })
+}
+```
+
+## Debugging Tips
+
+<CardGroup cols={2}>
+  <Card title="Check /health endpoint" icon="heart-pulse">
+    Verify service availability and database connectivity
+  </Card>
+  <Card title="Inspect task status" icon="magnifying-glass">
+    Use `GET /api/email/status/{task_id}` for detailed error info
+  </Card>
+  <Card title="Review Logfire traces" icon="chart-line">
+    Access distributed traces with task_id for root cause analysis
+  </Card>
+  <Card title="Test in /docs" icon="flask">
+    Use FastAPI's interactive docs to isolate issues
+  </Card>
+</CardGroup>
+
+## Support
+
+If you encounter persistent errors:
+
+1. Collect the following information:
+   - HTTP status code
+   - Error message
+   - Request payload
+   - `task_id` (if applicable)
+   - Timestamp
+
+2. Check the `/health` endpoint for service status
+
+3. Review [Common Error Scenarios](#common-error-scenarios) above
+
+4. Contact support with the collected information
+
+<CardGroup cols={2}>
+  <Card title="Authentication Guide" icon="key" href="/api/authentication">
+    Troubleshoot authentication errors
+  </Card>
+  <Card title="Task Status" icon="clock" href="/api/task-status">
+    Monitor async task execution
+  </Card>
+</CardGroup>

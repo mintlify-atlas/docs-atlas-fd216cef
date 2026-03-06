@@ -1,0 +1,337 @@
+---
+title: "Rate Limits"
+description: "API rate limiting and best practices"
+---
+
+# Rate Limits
+
+Scribe Backend currently has soft rate limits to ensure fair usage and system stability. This page documents current limits and best practices for high-volume usage.
+
+## Current Rate Limits
+
+<Note>
+Scribe Backend does not enforce hard rate limits at the infrastructure level. However, operational limits exist to protect system resources.
+</Note>
+
+### Batch Operations
+
+<ParamField path="Maximum batch size" type="integer" default="100">
+  Maximum number of items per `POST /api/queue/batch` request
+</ParamField>
+
+**Example:**
+
+```bash
+curl -X POST https://scribeapi.manitmishra.com/api/queue/batch \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "items": [
+      {"recipient_name": "Dr. Jane Smith", "recipient_interest": "ML"},
+      // ... up to 100 items total
+    ],
+    "email_template": "Hi {{name}}!"
+  }'
+```
+
+<Warning>
+Requests exceeding 100 items will return `400 Bad Request` with error message: "Maximum 100 items per batch"
+</Warning>
+
+### Celery Worker Concurrency
+
+**Sequential Processing:** The Celery worker runs with `concurrency=1` to:
+- Prevent API rate limits on external services (Exa, ArXiv, Anthropic)
+- Optimize memory usage on resource-constrained hardware (Raspberry Pi)
+- Ensure FIFO queue processing
+
+**Impact:** Queue items are processed one at a time in order of submission.
+
+### External API Limits
+
+Scribe Backend interacts with external APIs that have their own rate limits:
+
+| Service | Rate Limit | Impact |
+|---------|------------|--------|
+| **Anthropic Claude** | Tier-dependent | LLM calls in template_parser and email_composer |
+| **Exa Search** | 1000 requests/month (free tier) | Web scraping in web_scraper step |
+| **ArXiv API** | 1 request/3 seconds | Academic paper fetching in arxiv_helper |
+
+<Info>
+The pipeline implements automatic retry logic with exponential backoff for external API rate limits.
+</Info>
+
+## Rate Limit Responses
+
+### 429 Too Many Requests
+
+When rate limits are exceeded, the API returns:
+
+```json
+{
+  "detail": "Maximum 100 items per batch"
+}
+```
+
+**Retry Strategy:**
+
+```javascript
+const response = await fetch('/api/queue/batch', options)
+
+if (response.status === 429) {
+  const retryAfter = response.headers.get('Retry-After') || 60
+  await new Promise(resolve => setTimeout(resolve, retryAfter * 1000))
+  // Retry the request
+}
+```
+
+## Best Practices
+
+### Batch Submissions
+
+<AccordionGroup>
+  <Accordion title="Split large batches into chunks">
+    If you need to process more than 100 emails:
+
+    ```javascript
+    const recipients = [...] // 250 recipients
+    const chunkSize = 100
+
+    for (let i = 0; i < recipients.length; i += chunkSize) {
+      const chunk = recipients.slice(i, i + chunkSize)
+      
+      await fetch('/api/queue/batch', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          items: chunk,
+          email_template: template
+        })
+      })
+
+      // Optional: Add delay between chunks
+      await new Promise(resolve => setTimeout(resolve, 1000))
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Monitor queue status before submitting more">
+    Check queue backlog before submitting additional batches:
+
+    ```javascript
+    const queueStatus = await fetch('/api/queue/', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    }).then(r => r.json())
+
+    const pendingCount = queueStatus.filter(item => item.status === 'PENDING').length
+
+    if (pendingCount < 50) {
+      // Submit next batch
+    } else {
+      // Wait for queue to drain
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Use exponential backoff for errors">
+    Implement exponential backoff for 429 and 5xx errors:
+
+    ```javascript
+    async function submitWithBackoff(url, options, maxRetries = 3) {
+      for (let i = 0; i < maxRetries; i++) {
+        const response = await fetch(url, options)
+
+        if (response.ok) return response
+
+        if (response.status === 429 || response.status >= 500) {
+          const delay = Math.pow(2, i) * 1000 // 1s, 2s, 4s
+          await new Promise(resolve => setTimeout(resolve, delay))
+          continue
+        }
+
+        // Don't retry client errors
+        return response
+      }
+      throw new Error('Max retries exceeded')
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Polling
+
+<AccordionGroup>
+  <Accordion title="Use appropriate polling intervals">
+    **Recommended intervals:**
+
+    - Queue status: Poll every **2 seconds** while items are pending/processing
+    - Task status: Poll every **2 seconds** for first 30 seconds, then **5 seconds**
+    - Stop polling after task completes or expires (1 hour)
+
+    ```javascript
+    async function pollTaskStatus(taskId, token) {
+      let attempts = 0
+      
+      while (attempts < 180) { // 6 minutes max
+        const response = await fetch(`/api/email/status/${taskId}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        })
+        const data = await response.json()
+
+        if (data.status === 'SUCCESS' || data.status === 'FAILURE') {
+          return data
+        }
+
+        // Adaptive polling: 2s for first 15 attempts, then 5s
+        const delay = attempts < 15 ? 2000 : 5000
+        await new Promise(resolve => setTimeout(resolve, delay))
+        attempts++
+      }
+
+      throw new Error('Task timeout')
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Stop polling when complete">
+    Always terminate polling loops when tasks complete:
+
+    ```javascript
+    const pollInterval = setInterval(async () => {
+      const status = await fetch('/api/queue/', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      }).then(r => r.json())
+
+      const hasActive = status.some(item => 
+        item.status === 'PENDING' || item.status === 'PROCESSING'
+      )
+
+      if (!hasActive) {
+        clearInterval(pollInterval)
+        console.log('All items processed')
+      }
+    }, 2000)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Optimizing for High Volume
+
+<CardGroup cols={2}>
+  <Card title="Cache email templates" icon="database">
+    Store frequently-used templates in your database instead of regenerating
+  </Card>
+  <Card title="Batch by template" icon="layer-group">
+    Group recipients by template to minimize context switching
+  </Card>
+  <Card title="Monitor queue depth" icon="chart-line">
+    Track queue length and adjust submission rate accordingly
+  </Card>
+  <Card title="Use webhooks (future)" icon="webhook">
+    Avoid polling by implementing webhook notifications (planned feature)
+  </Card>
+</CardGroup>
+
+## Processing Time Estimates
+
+Typical pipeline execution times per email:
+
+| Template Type | Average Time | Notes |
+|---------------|--------------|-------|
+| **GENERAL** | ~8-9 seconds | Fastest (skips ArXiv step) |
+| **BOOK** | ~9-10 seconds | Skips ArXiv step |
+| **RESEARCH** | ~10-12 seconds | Includes ArXiv paper fetching |
+
+**Batch Processing Time:**
+
+```python
+# For a batch of 100 emails (RESEARCH type):
+processing_time = 100 emails × 11 seconds/email = 1100 seconds (~18 minutes)
+```
+
+<Info>
+Processing time varies based on:
+- Template complexity
+- Web scraping content length
+- External API response times
+- LLM generation speed
+</Info>
+
+## Future Rate Limit Plans
+
+<Note>
+The following features are planned for future releases:
+</Note>
+
+### Tiered Rate Limits
+
+- **Free Tier**: 100 emails/day, 10 concurrent queue items
+- **Pro Tier**: 1000 emails/day, 50 concurrent queue items
+- **Enterprise Tier**: Unlimited emails, dedicated worker
+
+### Rate Limit Headers
+
+Future API responses will include rate limit headers:
+
+```
+X-RateLimit-Limit: 1000
+X-RateLimit-Remaining: 847
+X-RateLimit-Reset: 1640995200
+```
+
+### Webhook Notifications
+
+Eliminate polling with webhook support:
+
+```json
+{
+  "event": "email.generated",
+  "task_id": "abc-123",
+  "email_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "SUCCESS",
+  "timestamp": "2025-01-13T10:30:00Z"
+}
+```
+
+## Monitoring Rate Limits
+
+Track your usage with these queries:
+
+### Daily Email Count
+
+```bash
+curl -X GET "https://scribeapi.manitmishra.com/api/user/profile" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Response:**
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "email": "user@example.com",
+  "generation_count": 42,
+  "created_at": "2025-01-01T00:00:00Z"
+}
+```
+
+### Active Queue Items
+
+```bash
+curl -X GET "https://scribeapi.manitmishra.com/api/queue/" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+Count `PENDING` and `PROCESSING` items to gauge current load.
+
+<CardGroup cols={2}>
+  <Card title="Queue System" icon="list-check" href="/concepts/queue-system">
+    Learn about the database-backed queue architecture
+  </Card>
+  <Card title="Real-Time Updates" icon="clock" href="/api/real-time-updates">
+    Optimize polling strategies for queue status
+  </Card>
+</CardGroup>
