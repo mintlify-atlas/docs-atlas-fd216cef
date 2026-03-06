@@ -1,0 +1,138 @@
+{
+  "projectType": "api-service",
+  "projectName": "Scribe Backend",
+  "projectDescription": "AI-powered cold email generation API with multi-step agentic pipeline for personalized academic outreach.",
+  "theme": "palm",
+  "primaryColor": "#94cb04",
+  "lightColor": "#545454",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/pipeline",
+              "concepts/authentication",
+              "concepts/queue-system",
+              "concepts/template-types"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/installation",
+              "guides/configuration",
+              "guides/database-setup",
+              "guides/running-locally",
+              "guides/deployment"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/setup",
+              "development/testing",
+              "development/debugging",
+              "development/project-structure"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api/overview",
+              "api/authentication",
+              "api/errors",
+              "api/rate-limits"
+            ]
+          },
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api/endpoints/user",
+              "api/endpoints/email",
+              "api/endpoints/queue",
+              "api/endpoints/template"
+            ]
+          },
+          {
+            "group": "Webhooks & Events",
+            "pages": [
+              "api/task-status",
+              "api/real-time-updates"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Pipeline",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "pipeline/introduction",
+              "pipeline/architecture",
+              "pipeline/data-flow"
+            ]
+          },
+          {
+            "group": "Steps",
+            "pages": [
+              "pipeline/steps/template-parser",
+              "pipeline/steps/web-scraper",
+              "pipeline/steps/arxiv-helper",
+              "pipeline/steps/email-composer"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "pipeline/error-handling",
+              "pipeline/observability",
+              "pipeline/customization"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Multi-step AI pipeline for personalized email generation",
+    "Database-backed queue system with batch processing",
+    "Real-time task status tracking via Celery",
+    "Supabase authentication with JWT validation",
+    "ArXiv integration for academic paper discovery",
+    "Playwright-powered web scraping with JavaScript support",
+    "Comprehensive observability with Logfire integration",
+    "Type-safe Pydantic models throughout"
+  ],
+  "publicApiSurface": [
+    "POST /api/user/init - Initialize user profile",
+    "GET /api/user/profile - Get current user",
+    "POST /api/email/generate - Generate single email (async)",
+    "GET /api/email/status/{task_id} - Check generation status",
+    "GET /api/email/{email_id} - Retrieve email by ID",
+    "GET /api/email/ - List user's emails",
+    "PATCH /api/email/{email_id} - Update email properties",
+    "POST /api/queue/batch - Submit batch (1-100 recipients)",
+    "GET /api/queue/ - Get all user's queue items",
+    "DELETE /api/queue/{id} - Cancel pending queue item",
+    "POST /api/templates/ - Generate template from resume",
+    "GET /health - Health check with database status"
+  ]
+}
