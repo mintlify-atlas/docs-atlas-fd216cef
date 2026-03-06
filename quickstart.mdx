@@ -1,0 +1,441 @@
+---
+title: "Quickstart"
+description: "Get Scribe running in 5 minutes and generate your first personalized cold email"
+---
+
+# Quickstart
+
+Get Scribe Backend up and running on your machine in 5 minutes and generate your first personalized academic outreach email.
+
+## Overview
+
+This guide will walk you through:
+
+<Steps>
+  <Step title="Install dependencies and configure environment" number="1">
+    Set up Python, Redis, and required API keys (2 minutes)
+  </Step>
+  <Step title="Start the development server and Celery worker" number="2">
+    Launch FastAPI server and background task processor (1 minute)
+  </Step>
+  <Step title="Generate your first personalized email" number="3">
+    Test the email generation pipeline with a real example (2 minutes)
+  </Step>
+</Steps>
+
+<Note>
+**Prerequisites**: macOS or Linux, Python 3.13+, Redis, and basic command-line familiarity.
+
+For detailed setup instructions, see the [Installation Guide](/guides/installation).
+</Note>
+
+## Step 1: Installation
+
+### Clone and Setup Virtual Environment
+
+```bash
+# Navigate to project directory
+cd /path/to/scribe-backend
+
+# Create virtual environment
+python3.13 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+### Install Dependencies
+
+<CodeGroup>
+
+```bash Python Dependencies
+pip install -r requirements.txt
+```
+
+```bash Playwright Browsers
+playwright install chromium  # 300MB download for web scraping
+```
+
+</CodeGroup>
+
+### Configure Environment Variables
+
+Create a `.env` file in the project root:
+
+```bash .env
+# Database (Supabase)
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your_service_role_key_here
+
+# Database Connection
+DB_USER=postgres.<project-ref>
+DB_PASSWORD=your-password
+DB_HOST=aws-1-<region>.pooler.supabase.com
+DB_PORT=6543
+DB_NAME=postgres
+
+# AI APIs
+ANTHROPIC_API_KEY=sk-ant-your_key_here
+EXA_API_KEY=your_exa_api_key_here
+
+# Celery & Redis
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+
+# Optional: Observability
+LOGFIRE_TOKEN=your_logfire_token_here
+
+# Server
+ENVIRONMENT=development
+DEBUG=True
+ALLOWED_ORIGINS=http://localhost:3000
+```
+
+<AccordionGroup>
+  <Accordion title="Where to get API keys">
+    **Required API Keys:**
+    
+    - **Anthropic API Key**: [console.anthropic.com](https://console.anthropic.com/) - For Claude AI email generation
+    - **Exa API Key**: [exa.ai](https://exa.ai/) - For AI-powered web search
+    - **Supabase URL & Key**: Your Supabase project dashboard - For authentication and database
+    
+    **Optional:**
+    
+    - **Logfire Token**: [logfire.pydantic.dev](https://logfire.pydantic.dev/) - For observability (optional but recommended)
+  </Accordion>
+</AccordionGroup>
+
+### Run Database Migrations
+
+```bash
+alembic upgrade head
+```
+
+<Note>
+This creates the necessary database tables (users, emails, queue_items, templates).
+</Note>
+
+## Step 2: Start Services
+
+### Quick Start (Recommended)
+
+Start all services with a single command using the Makefile:
+
+```bash
+# Terminal 1: Start Redis + FastAPI + Celery Worker
+make redis-start  # Start Redis in background
+make serve        # Starts FastAPI + Celery worker together
+```
+
+**Verify it's running:**
+
+```bash
+curl http://localhost:8000/health
+```
+
+Expected response:
+
+```json
+{
+  "status": "healthy",
+  "service": "scribe-api",
+  "version": "1.0.0",
+  "database": "connected",
+  "environment": "development"
+}
+```
+
+### Manual Start (For Debugging)
+
+If you prefer to run services separately:
+
+<Steps>
+  <Step title="Start Redis">
+    ```bash Terminal 1
+    redis-server
+    ```
+  </Step>
+  
+  <Step title="Start FastAPI Server">
+    ```bash Terminal 2
+    uvicorn main:app --reload --host 0.0.0.0 --port 8000
+    ```
+  </Step>
+  
+  <Step title="Start Celery Worker">
+    ```bash Terminal 3
+    celery -A celery_config.celery_app worker --loglevel=info --queues=email_default --concurrency=1
+    ```
+  </Step>
+</Steps>
+
+<Info>
+The Celery worker runs with `concurrency=1` for sequential processing, which prevents API rate limits and optimizes memory usage.
+</Info>
+
+## Step 3: Generate Your First Email
+
+### Initialize Your User Profile
+
+First, obtain a JWT token from Supabase (or use your frontend authentication). Then initialize your user profile:
+
+```bash
+curl -X POST http://localhost:8000/api/user/init \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "display_name": "Your Name"
+  }'
+```
+
+### Generate a Single Email
+
+Now let's generate a personalized cold email:
+
+```bash
+curl -X POST http://localhost:8000/api/email/generate \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email_template": "Hi {{name}}, I am fascinated by your work on {{research}}. I would love to discuss potential research opportunities.",
+    "recipient_name": "Dr. Geoffrey Hinton",
+    "recipient_interest": "deep learning and neural networks"
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "task_id": "abc-123-def-456"
+}
+```
+
+### Poll for Task Completion
+
+The email generation is asynchronous (~10 seconds). Poll the status endpoint:
+
+```bash
+curl http://localhost:8000/api/email/status/abc-123-def-456 \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**When complete:**
+
+```json
+{
+  "task_id": "abc-123-def-456",
+  "status": "SUCCESS",
+  "result": {
+    "email_id": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "completed"
+  }
+}
+```
+
+### Retrieve the Generated Email
+
+```bash
+curl http://localhost:8000/api/email/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Example Response:**
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "user_id": "660e8400-e29b-41d4-a716-446655440001",
+  "recipient_name": "Dr. Geoffrey Hinton",
+  "recipient_interest": "deep learning and neural networks",
+  "email_message": "Hi Dr. Hinton, I am fascinated by your pioneering work on deep learning and neural networks, particularly your recent research on capsule networks...",
+  "template_type": "research",
+  "metadata": {
+    "search_terms": ["Dr. Geoffrey Hinton deep learning"],
+    "scraped_urls": ["https://www.cs.toronto.edu/~hinton/"],
+    "arxiv_papers": [
+      {
+        "title": "A Fast Learning Algorithm for Deep Belief Nets",
+        "authors": ["Geoffrey E. Hinton"],
+        "year": 2006
+      }
+    ]
+  },
+  "is_confident": true,
+  "created_at": "2025-01-13T10:30:00Z"
+}
+```
+
+<Note>
+The pipeline automatically:
+- Classifies the template type (RESEARCH, BOOK, GENERAL)
+- Searches for relevant information about the recipient
+- Fetches academic papers from ArXiv (for RESEARCH type)
+- Generates a personalized email using Claude AI
+</Note>
+
+## Batch Email Generation
+
+To generate multiple emails at once (up to 100):
+
+```bash
+curl -X POST http://localhost:8000/api/queue/batch \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "items": [
+      {
+        "recipient_name": "Dr. Geoffrey Hinton",
+        "recipient_interest": "deep learning"
+      },
+      {
+        "recipient_name": "Dr. Yann LeCun",
+        "recipient_interest": "convolutional neural networks"
+      },
+      {
+        "recipient_name": "Dr. Yoshua Bengio",
+        "recipient_interest": "representation learning"
+      }
+    ],
+    "email_template": "Hi {{name}}, I am fascinated by your work on {{research}}..."
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "queue_item_ids": ["uuid-1", "uuid-2", "uuid-3"],
+  "message": "Successfully queued 3 items"
+}
+```
+
+### Monitor Queue Status
+
+Poll the queue endpoint to track progress:
+
+```bash
+curl http://localhost:8000/api/queue/ \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Response:**
+
+```json
+[
+  {
+    "id": "uuid-1",
+    "recipient_name": "Dr. Geoffrey Hinton",
+    "status": "COMPLETED",
+    "email_id": "email-uuid-1",
+    "position": null,
+    "created_at": "2025-01-13T10:30:00Z"
+  },
+  {
+    "id": "uuid-2",
+    "recipient_name": "Dr. Yann LeCun",
+    "status": "PROCESSING",
+    "current_step": "web_scraper",
+    "position": null,
+    "created_at": "2025-01-13T10:30:01Z"
+  },
+  {
+    "id": "uuid-3",
+    "recipient_name": "Dr. Yoshua Bengio",
+    "status": "PENDING",
+    "position": 1,
+    "created_at": "2025-01-13T10:30:02Z"
+  }
+]
+```
+
+<Info>
+Items are processed sequentially (concurrency=1) in FIFO order. Each email takes ~10-12 seconds to generate.
+</Info>
+
+## Interactive API Documentation
+
+Explore the API with FastAPI's auto-generated interactive docs:
+
+```
+http://localhost:8000/docs
+```
+
+Features:
+- Try out all endpoints directly in the browser
+- View request/response schemas
+- Authenticate with your JWT token
+- See example requests and responses
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Core Concepts" icon="lightbulb" href="/concepts/pipeline">
+    Learn about the 4-step pipeline, authentication, and queue system
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/overview">
+    Explore complete API documentation with all endpoints
+  </Card>
+  <Card title="Configuration" icon="gear" href="/guides/configuration">
+    Understand all environment variables and configuration options
+  </Card>
+  <Card title="Pipeline Deep Dive" icon="diagram-project" href="/pipeline/introduction">
+    Understand how the email generation pipeline works
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Redis connection refused">
+    **Error**: `ConnectionRefusedError: [Errno 61] Connection refused`
+    
+    **Solution**:
+    ```bash
+    # Start Redis
+    redis-server
+    
+    # Or using Homebrew on macOS
+    brew services start redis
+    ```
+  </Accordion>
+
+  <Accordion title="Database connection failed">
+    **Error**: `Could not connect to database`
+    
+    **Solution**:
+    - Verify your Supabase credentials in `.env`
+    - Ensure you're using the **Transaction Pooler** (port 6543)
+    - Check that migrations have been run: `alembic upgrade head`
+  </Accordion>
+
+  <Accordion title="Playwright browser not found">
+    **Error**: `playwright._impl._api_types.Error: Executable doesn't exist`
+    
+    **Solution**:
+    ```bash
+    playwright install chromium
+    ```
+  </Accordion>
+
+  <Accordion title="Missing API key errors">
+    **Error**: `ANTHROPIC_API_KEY not found` or `EXA_API_KEY not found`
+    
+    **Solution**:
+    - Ensure your `.env` file is in the project root
+    - Check that all required API keys are set
+    - Restart the server after updating `.env`
+  </Accordion>
+
+  <Accordion title="401 Unauthorized">
+    **Error**: `Invalid or expired token`
+    
+    **Solution**:
+    - Verify your JWT token is valid
+    - Initialize your user profile with `POST /api/user/init`
+    - Refresh your Supabase session if expired
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+For more troubleshooting help, see the [Debugging Guide](/development/debugging).
+</Note>
